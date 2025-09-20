@@ -10,12 +10,11 @@ import matplotlib.pyplot as plt
 """ 
 This code generates Amplitude and Phase scalograms using I/Q data.
 """
-SNR = "-2"
 
-def generateWaveletTransform(data_type):
-    input_dir = f'Dataset/snr_{SNR}/{data_type}'
-    output_dir = f'Scalograms/snr_{SNR}/{data_type}'
-    samples_dir = f'ScalogramSamples/snr_{SNR}/{data_type}'
+def generateWaveletTransform(data_type, snr):
+    input_dir = f'Dataset/snr_{snr}/{data_type}'
+    output_dir = f'Scalograms/snr_{snr}/{data_type}'
+    samples_dir = f'ScalogramSamples/snr_{snr}/{data_type}'
 
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(samples_dir, exist_ok=True)
@@ -76,7 +75,7 @@ classes = [
   "FM", "GMSK", "OQPSK"
 ]
 
-
-for data_type in classes:
-    generateWaveletTransform(data_type)
+for i in range(-20,31,2):
+    for data_type in classes:
+        generateWaveletTransform(data_type,i)
 
