@@ -75,7 +75,7 @@ classes = [
   "FM", "GMSK", "OQPSK"
 ]
 
-for i in range(-20,31,2):
-    for data_type in classes:
-        generateWaveletTransform(data_type,i)
+snr = 30
+for data_type in classes:
+    generateWaveletTransform(data_type,snr)
 
