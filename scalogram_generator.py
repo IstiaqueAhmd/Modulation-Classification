@@ -48,10 +48,15 @@ def generateWaveletTransform(data_type, snr):
             cwt_amplitude = cv2.resize(cwt_amplitude, (224, 224), interpolation=cv2.INTER_LANCZOS4)
             cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
 
+            # Apply CLAHE
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            cwt_amplitude = clahe.apply((cwt_amplitude * 255).astype(np.uint8)) / 255.0
+            cwt_phase = clahe.apply((cwt_phase * 255).astype(np.uint8)) / 255.0
+
             stacked_scalogram = np.stack([cwt_amplitude, cwt_phase], axis=-1)
 
             output_path = os.path.join(output_dir, os.path.splitext(filename)[0] + '.npy')
-            np.save(output_path, stacked_scalogram)
+            np.save(output_path, stacked_scalogram.astype(np.float32))
 
             if sample_count < 5:
                 amp_img_path = os.path.join(samples_dir, f"{os.path.splitext(filename)[0]}_amp.png")
