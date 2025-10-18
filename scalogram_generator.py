@@ -39,8 +39,8 @@ def generateWaveletTransform(data_type, snr, max_scalograms=None, save_samples=F
             frame_path = os.path.join(input_dir, filename)
             data = np.load(frame_path)
 
-            I = data[:, 0]  # First row: I component (1024 samples)
-            Q = data[:, 1]  # Second row: Q component (1024 samples) 
+            I = data[:, 0]  # First Col: I component (1024 samples)
+            Q = data[:, 1]  # Second Col: Q component (1024 samples) 
 
             amplitude = np.sqrt(I ** 2 + Q ** 2)
             phase = np.arctan2(Q, I)
