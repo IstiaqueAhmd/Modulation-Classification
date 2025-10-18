@@ -27,8 +27,8 @@ def generateWaveletTransform(data_type, snr):
             frame_path = os.path.join(input_dir, filename)
             data = np.load(frame_path)
 
-            I = data[0, :]  # First row: I component (1024 samples)
-            Q = data[1, :]  # Second row: Q component (1024 samples) 
+            I = data[:, 0]  # First row: I component (1024 samples)
+            Q = data[:, 1]  # Second row: Q component (1024 samples) 
 
             amplitude = np.sqrt(I ** 2 + Q ** 2)
             phase = np.arctan2(Q, I)
@@ -48,10 +48,10 @@ def generateWaveletTransform(data_type, snr):
             cwt_amplitude = cv2.resize(cwt_amplitude, (224, 224), interpolation=cv2.INTER_LANCZOS4)
             cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
 
-            # Apply CLAHE
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            cwt_amplitude = clahe.apply((cwt_amplitude * 255).astype(np.uint8)) / 255.0
-            cwt_phase = clahe.apply((cwt_phase * 255).astype(np.uint8)) / 255.0
+            # # Apply CLAHE
+            # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            # cwt_amplitude = clahe.apply((cwt_amplitude * 255).astype(np.uint8)) / 255.0
+            # cwt_phase = clahe.apply((cwt_phase * 255).astype(np.uint8)) / 255.0
 
             stacked_scalogram = np.stack([cwt_amplitude, cwt_phase], axis=-1)
 
@@ -71,16 +71,14 @@ def generateWaveletTransform(data_type, snr):
 # Run for multiple modulation types
 classes = [
   "OOK", "4ASK", "8ASK",
-  "BPSK", "QPSK", "8PSK",
-  "16PSK", "32PSK", "16APSK",
-  "32APSK", "64APSK", "128APSK",
-  "16QAM", "32QAM", "64QAM",
-  "128QAM", "256QAM", "AM-SSB-WC",
-  "AM-SSB-SC", "AM-DSB-WC", "AM-DSB-SC",
+  "BPSK", "QPSK", "8PSK", 
+  "16APSK", "64QAM", 
+  "AM-SSB-WC","AM-DSB-WC",
   "FM", "GMSK", "OQPSK"
 ]
 
-snr = 30
+
+snr = 10
 for data_type in classes:
     generateWaveletTransform(data_type,snr)
 
