@@ -12,10 +12,10 @@ This code generates Amplitude and Phase scalograms using I/Q data.
 """
 
 # Configuration parameters
-MAX_SCALOGRAMS = 1000  # Set to None to process all available scalograms, or specify a number
+MAX_SCALOGRAMS = None  # Set to None to process all available scalograms, or specify a number
 SAVE_SAMPLES = True   # Set to False if you don't want to save sample images
 NUM_SAMPLES = 5       # Number of sample images to save (only used if SAVE_SAMPLES is True)
-SNR = 10
+SNR = -10
 
 def generateWaveletTransform(data_type, snr, max_scalograms=None, save_samples=False, num_samples=5):
     input_dir = f'Dataset/snr_{snr}/{data_type}'
