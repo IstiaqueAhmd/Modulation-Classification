@@ -11,19 +11,31 @@ import matplotlib.pyplot as plt
 This code generates Amplitude and Phase scalograms using I/Q data.
 """
 
-def generateWaveletTransform(data_type, snr):
+# Configuration parameters
+MAX_SCALOGRAMS = 1000  # Set to None to process all available scalograms, or specify a number
+SAVE_SAMPLES = True   # Set to False if you don't want to save sample images
+NUM_SAMPLES = 5       # Number of sample images to save (only used if SAVE_SAMPLES is True)
+SNR = 10
+
+def generateWaveletTransform(data_type, snr, max_scalograms=None, save_samples=False, num_samples=5):
     input_dir = f'Dataset/snr_{snr}/{data_type}'
     output_dir = f'Scalograms/snr_{snr}/{data_type}'
     samples_dir = f'ScalogramSamples/snr_{snr}/{data_type}'
 
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(samples_dir, exist_ok=True)
+    if save_samples:
+        os.makedirs(samples_dir, exist_ok=True)
 
     sample_count = 0
+    scalogram_count = 0
 
 
     for filename in os.listdir(input_dir):
         if filename.endswith('.npy'):
+            # Check if we've reached the maximum number of scalograms to process
+            if max_scalograms is not None and scalogram_count >= max_scalograms:
+                break
+                
             frame_path = os.path.join(input_dir, filename)
             data = np.load(frame_path)
 
@@ -48,17 +60,13 @@ def generateWaveletTransform(data_type, snr):
             cwt_amplitude = cv2.resize(cwt_amplitude, (224, 224), interpolation=cv2.INTER_LANCZOS4)
             cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
 
-            # # Apply CLAHE
-            # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            # cwt_amplitude = clahe.apply((cwt_amplitude * 255).astype(np.uint8)) / 255.0
-            # cwt_phase = clahe.apply((cwt_phase * 255).astype(np.uint8)) / 255.0
-
             stacked_scalogram = np.stack([cwt_amplitude, cwt_phase], axis=-1)
 
             output_path = os.path.join(output_dir, os.path.splitext(filename)[0] + '.npy')
             np.save(output_path, stacked_scalogram.astype(np.float32))
+            scalogram_count += 1
 
-            if sample_count < 5:
+            if save_samples and sample_count < num_samples:
                 amp_img_path = os.path.join(samples_dir, f"{os.path.splitext(filename)[0]}_amp.png")
                 phase_img_path = os.path.join(samples_dir, f"{os.path.splitext(filename)[0]}_phase.png")
 
@@ -66,7 +74,11 @@ def generateWaveletTransform(data_type, snr):
                 plt.imsave(phase_img_path, cwt_phase, cmap='gray', vmin=0, vmax=1)
 
                 sample_count += 1
-    print(f"Stacked wavelet transforms saved for {data_type}, including 5 raw sample images.")
+    if save_samples:
+        print(f"Stacked wavelet transforms saved for {data_type}: {scalogram_count} scalograms, including {sample_count} raw sample images.")
+    else:
+        print(f"Stacked wavelet transforms saved for {data_type}: {scalogram_count} scalograms.")
+
 
 # Run for multiple modulation types
 classes = [
@@ -77,8 +89,6 @@ classes = [
   "FM", "GMSK", "OQPSK"
 ]
 
-
-snr = 10
 for data_type in classes:
-    generateWaveletTransform(data_type,snr)
+    generateWaveletTransform(data_type, SNR, max_scalograms=MAX_SCALOGRAMS, save_samples=SAVE_SAMPLES, num_samples=NUM_SAMPLES)
 
