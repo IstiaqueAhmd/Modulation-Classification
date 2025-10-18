@@ -108,7 +108,7 @@ class DualStreamCNN(nn.Module):
 
 if __name__ == '__main__':
     # Set SNR
-    snr = "-20"
+    snr = "30"
     
     # Dataset setup
     train_dir = f'Dataset(Splitted)/snr_{snr}/train'
@@ -251,13 +251,14 @@ if __name__ == '__main__':
     # Confusion matrices
     plt.figure(figsize=(15, 6))
 
-    # Raw counts
+    # Normalized confusion matrix (0-1 range)
     plt.subplot(1, 2, 1)
     cm = confusion_matrix(all_labels, all_preds)
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    sns.heatmap(cm_normalized, annot=True, fmt=".3f", cmap="Blues",
                 xticklabels=train_dataset.classes,
                 yticklabels=train_dataset.classes)
-    plt.title("Confusion Matrix")
+    plt.title("Confusion Matrix (Normalized)")
 
     #Loss track
     plt.subplot(1, 2, 2)
