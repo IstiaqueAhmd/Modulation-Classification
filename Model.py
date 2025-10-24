@@ -107,13 +107,9 @@ class DualStreamCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    # Set SNR
-    snr = "30"
-    
-    # Dataset setup
-    train_dir = f'Dataset(Splitted)/snr_{snr}/train'
-    val_dir = f'Dataset(Splitted)/snr_{snr}/val'
-    test_dir = f'Dataset(Splitted)/snr_{snr}/test'
+    # Dataset setup for training and validation
+    train_dir = 'Dataset(Splitted)/combined/train'
+    val_dir = 'Dataset(Splitted)/combined/val'
 
     # Calculate dataset stats
     temp_train = ScalogramDataset(train_dir)
@@ -127,19 +123,17 @@ if __name__ == '__main__':
         transforms.Normalize(mean, std)
     ])
 
-    val_test_transform = transforms.Compose([
+    val_transform = transforms.Compose([
         transforms.Normalize(mean, std)
     ])
 
     # Create datasets
     train_dataset = ScalogramDataset(train_dir, train_transform)
-    val_dataset = ScalogramDataset(val_dir, val_test_transform)
-    test_dataset = ScalogramDataset(test_dir, val_test_transform)
+    val_dataset = ScalogramDataset(val_dir, val_transform)
 
     # Data loaders
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
 
     # Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -229,48 +223,23 @@ if __name__ == '__main__':
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
 
-    # Final evaluation
-    model.load_state_dict(torch.load("model.pth"))
-    model.eval()
-
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, predicted = outputs.max(1)
-
-            all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-
-    # Classification report
-    print("Classification Report:")
-    print(classification_report(all_labels, all_preds, target_names=train_dataset.classes))
-
-    # Confusion matrices
-    plt.figure(figsize=(15, 6))
-
-    # Normalized confusion matrix (0-1 range)
-    plt.subplot(1, 2, 1)
-    cm = confusion_matrix(all_labels, all_preds)
-    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-    sns.heatmap(cm_normalized, annot=True, fmt=".3f", cmap="Blues",
-                xticklabels=train_dataset.classes,
-                yticklabels=train_dataset.classes)
-    plt.title("Confusion Matrix (Normalized)")
-
-    #Loss track
-    plt.subplot(1, 2, 2)
+    # Training complete - save final stats
+    print(f"\nTraining completed!")
+    print(f"Best validation accuracy: {best_val_acc:.4f}")
+    print(f"Model saved to: model.pth")
+    
+    # Plot training curves
+    plt.figure(figsize=(10, 6))
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Loss Curve')
+    plt.title('Training and Validation Loss')
     plt.legend()
     plt.grid(True)
-
     plt.tight_layout()
-    plt.savefig("confusion_matrices_10.png")
+    plt.savefig("training_curves.png")
     plt.show()
+    
+    print("\nFor testing on different SNR levels, use test.py")
 
