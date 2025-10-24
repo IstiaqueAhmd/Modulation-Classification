@@ -7,7 +7,7 @@ from PIL import Image
 snr = "30"
 
 # Set the paths for the dataset
-base_path = f"Dataset/snr_{snr}"
+base_path = f"Scalograms/snr_{snr}"
 output_base = f"Dataset(Splitted)/snr_{snr}"
 
 # Create output directories
