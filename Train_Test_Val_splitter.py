@@ -4,10 +4,10 @@ import shutil
 from PIL import Image
 
 # Set the SNR
-snr = "-20"
+snr = "30"
 
 # Set the paths for the dataset
-base_path = f"Scalograms/snr_{snr}"
+base_path = f"Dataset/snr_{snr}"
 output_base = f"Dataset(Splitted)/snr_{snr}"
 
 # Create output directories
@@ -20,16 +20,10 @@ os.makedirs(test_dir, exist_ok=True)
 os.makedirs(val_dir, exist_ok=True)
 
 # Adjust these paths and classes
-classes = [
-  "OOK", "4ASK", "8ASK",
-  "BPSK", "QPSK", "8PSK",
-  "16PSK", "32PSK", "16APSK",
-  "32APSK", "64APSK", "128APSK",
-  "16QAM", "32QAM", "64QAM",
-  "128QAM", "256QAM", "AM-SSB-WC",
-  "AM-SSB-SC", "AM-DSB-WC", "AM-DSB-SC",
-  "FM", "GMSK", "OQPSK"
-]
+classes = ['32PSK','16APSK','32QAM','FM','GMSK','32APSK','OQPSK',
+ '8ASK','BPSK','8PSK','AM-SSB-SC','4ASK','16PSK','64APSK','128QAM',
+ '128APSK','AM-DSB-SC','AM-SSB-WC','64QAM','QPSK','256QAM','AM-DSB-WC',
+ 'OOK','16QAM']
 
 # Set the split ratios
 train_ratio = 0.8

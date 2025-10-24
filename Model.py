@@ -271,6 +271,6 @@ if __name__ == '__main__':
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("confusion_matrices.png")
+    plt.savefig("confusion_matrices_10.png")
     plt.show()
 
