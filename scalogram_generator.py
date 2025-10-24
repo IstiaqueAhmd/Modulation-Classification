@@ -15,7 +15,7 @@ This code generates Amplitude and Phase scalograms using I/Q data.
 MAX_SCALOGRAMS = 1000  # Set to None to process all available scalograms, or specify a number
 SAVE_SAMPLES = True   # Set to False if you don't want to save sample images
 NUM_SAMPLES = 5       # Number of sample images to save (only used if SAVE_SAMPLES is True)
-SNR = 20
+SNR = -20
 
 def generateWaveletTransform(data_type, snr, max_scalograms=None, save_samples=False, num_samples=5):
     input_dir = f'Dataset/snr_{snr}/{data_type}'
@@ -62,7 +62,10 @@ def generateWaveletTransform(data_type, snr, max_scalograms=None, save_samples=F
 
             stacked_scalogram = np.stack([cwt_amplitude, cwt_phase], axis=-1)
 
-            output_path = os.path.join(output_dir, os.path.splitext(filename)[0] + '.npy')
+            # Add SNR to the filename
+            base_filename = os.path.splitext(filename)[0]
+            output_filename = f"{base_filename}_snr_{snr}.npy"
+            output_path = os.path.join(output_dir, output_filename)
             np.save(output_path, stacked_scalogram.astype(np.float32))
             scalogram_count += 1
 
