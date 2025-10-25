@@ -5,7 +5,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, classification_report
@@ -17,7 +16,18 @@ random.seed(42)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-class ScalogramDataset(Dataset):
+
+# Custom normalization for 1D signals
+class SignalNormalize:
+    def __init__(self, mean, std):
+        self.mean = torch.tensor(mean, dtype=torch.float32).view(2, 1)
+        self.std = torch.tensor(std, dtype=torch.float32).view(2, 1)
+    
+    def __call__(self, signal):
+        # signal shape: (2, 1024)
+        return (signal - self.mean) / self.std
+
+class SignalDataset(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
         self.transform = transform
@@ -35,11 +45,11 @@ class ScalogramDataset(Dataset):
 
     def __getitem__(self, idx):
         file_path, label = self.data[idx]
-        scalogram = np.load(file_path).transpose(2, 0, 1)
-        scalogram = torch.tensor(scalogram, dtype=torch.float32)
+        signal = np.load(file_path)  # Shape: (1024, 2)
+        signal = torch.tensor(signal, dtype=torch.float32).T  # Transpose to (2, 1024)
         if self.transform:
-            scalogram = self.transform(scalogram)
-        return scalogram, label
+            signal = self.transform(signal)
+        return signal, label
 
 
 def calculate_dataset_stats(dataset):
@@ -53,99 +63,220 @@ def calculate_dataset_stats(dataset):
     return (mean / len(loader)).tolist(), (std / len(loader)).tolist()
 
 
-# Depthwise-Separable Conv Block
-class DSConv(nn.Module):
-    def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
+# Positional Encoding for Transformer
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=1024):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_ch, in_ch, k, s, p, groups=in_ch, bias=False), # Depth-wise
-            nn.BatchNorm2d(in_ch),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_ch, out_ch, 1, bias=False), # Point-wise
-            nn.BatchNorm2d(out_ch),
-            nn.ReLU(inplace=True)
-        )
-    def forward(self, x): return self.block(x)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # Shape: (1, max_len, d_model)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x shape: (batch_size, seq_len, d_model)
+        return x + self.pe[:, :x.size(1), :]
 
 
-# One stream (amplitude OR phase)
-def make_stream():
-    return nn.Sequential(
-        nn.Conv2d(1, 16, 7, 2, 3, bias=False),
-        nn.BatchNorm2d(16), 
-        nn.ReLU(inplace=True),
-        nn.MaxPool2d(3, 2),
-        DSConv(16, 32), 
-        nn.MaxPool2d(3, 2),
-        DSConv(32, 64), 
-        DSConv(64, 64),
-        DSConv(64, 32), 
-        nn.MaxPool2d(3, 2)
-    )
-
-
-class DualStreamCNN(nn.Module):
-    def __init__(self, num_classes, dropout=0.5):
+# Single Transformer Stream
+class TransformerStream(nn.Module):
+    def __init__(self, d_model=64, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1):
         super().__init__()
-        self.stream_amp = make_stream()
-        self.stream_phase = make_stream()
-        self.fuse = nn.Sequential(
-            DSConv(64, 64),
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten()
+        # Project 1D signal to d_model dimensions
+        self.input_projection = nn.Linear(1, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, max_len=1024)
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True
         )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+    def forward(self, x, return_sequence=False):
+        # x shape: (batch_size, 1024) - single channel
+        x = x.unsqueeze(-1)  # (batch_size, 1024, 1)
+        x = self.input_projection(x)  # (batch_size, 1024, d_model)
+        x = self.pos_encoder(x)
+        x = self.transformer(x)  # (batch_size, 1024, d_model)
+        
+        if return_sequence:
+            return x  # Return full sequence for latent attention
+        # Global average pooling
+        x = x.mean(dim=1)  # (batch_size, d_model)
+        return x
+
+
+# Multi-Head Latent Attention Module
+class LatentAttention(nn.Module):
+    def __init__(self, d_model, num_latents=32, nhead=4, dropout=0.1):
+        super().__init__()
+        self.num_latents = num_latents
+        self.d_model = d_model
+        
+        # Learnable latent queries
+        self.latent_queries = nn.Parameter(torch.randn(1, num_latents, d_model))
+        
+        # Multi-head cross-attention
+        self.cross_attention = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=nhead,
+            dropout=dropout,
+            batch_first=True
+        )
+        
+        # Layer norm
+        self.norm = nn.LayerNorm(d_model)
+        
+    def forward(self, x):
+        # x shape: (batch_size, seq_len, d_model)
+        batch_size = x.size(0)
+        
+        # Expand latent queries for batch
+        queries = self.latent_queries.expand(batch_size, -1, -1)  # (batch_size, num_latents, d_model)
+        
+        # Cross-attention: latents attend to input sequence
+        attn_output, _ = self.cross_attention(
+            query=queries,
+            key=x,
+            value=x
+        )
+        
+        # Residual connection and normalization
+        output = self.norm(queries + attn_output)
+        
+        return output  # (batch_size, num_latents, d_model)
+
+
+# Dual Stream Transformer with Latent Attention
+class DualStreamTransformer(nn.Module):
+    def __init__(self, num_classes, d_model=64, nhead=4, num_layers=2, dim_feedforward=256, 
+                 num_latents=32, dropout=0.1, use_latent_attention=True):
+        super().__init__()
+        self.use_latent_attention = use_latent_attention
+        
+        # Two separate streams for two channels
+        self.stream1 = TransformerStream(d_model, nhead, num_layers, dim_feedforward, dropout)
+        self.stream2 = TransformerStream(d_model, nhead, num_layers, dim_feedforward, dropout)
+        
+        if use_latent_attention:
+            # Latent attention for each stream
+            self.latent_attn1 = LatentAttention(d_model, num_latents, nhead, dropout)
+            self.latent_attn2 = LatentAttention(d_model, num_latents, nhead, dropout)
+            
+            # Cross-stream latent attention
+            self.cross_stream_attn = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=nhead,
+                dropout=dropout,
+                batch_first=True
+            )
+            self.norm = nn.LayerNorm(d_model)
+            
+            # Fusion operates on latent representations
+            fusion_input_dim = num_latents * d_model * 2
+        else:
+            # Simple fusion without latent attention
+            fusion_input_dim = d_model * 2
+        
+        # Fusion layer
+        self.fusion = nn.Sequential(
+            nn.Linear(fusion_input_dim, d_model * 2),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Classifier
         self.classifier = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, num_classes)
+            nn.Linear(d_model, num_classes)
         )
 
     def forward(self, x):
-        xa = self.stream_amp(x[:, 0:1])     # amplitude channel
-        xp = self.stream_phase(x[:, 1:2])   # phase channel
-        x = torch.cat([xa, xp], 1)          
-        return self.classifier(self.fuse(x))
+        # x shape: (batch_size, 2, 1024)
+        
+        if self.use_latent_attention:
+            # Get sequence outputs from both streams
+            x1_seq = self.stream1(x[:, 0, :], return_sequence=True)  # (batch_size, 1024, d_model)
+            x2_seq = self.stream2(x[:, 1, :], return_sequence=True)  # (batch_size, 1024, d_model)
+            
+            # Apply latent attention to compress sequences
+            x1_latent = self.latent_attn1(x1_seq)  # (batch_size, num_latents, d_model)
+            x2_latent = self.latent_attn2(x2_seq)  # (batch_size, num_latents, d_model)
+            
+            # Cross-stream attention: let stream1 latents attend to stream2 latents
+            x1_enhanced, _ = self.cross_stream_attn(
+                query=x1_latent,
+                key=x2_latent,
+                value=x2_latent
+            )
+            x1_latent = self.norm(x1_latent + x1_enhanced)
+            
+            # Flatten latent representations
+            x1_flat = x1_latent.flatten(1)  # (batch_size, num_latents * d_model)
+            x2_flat = x2_latent.flatten(1)  # (batch_size, num_latents * d_model)
+            
+            # Concatenate and fuse
+            x = torch.cat([x1_flat, x2_flat], dim=1)
+        else:
+            # Standard pooling without latent attention
+            x1 = self.stream1(x[:, 0, :])  # (batch_size, d_model)
+            x2 = self.stream2(x[:, 1, :])  # (batch_size, d_model)
+            x = torch.cat([x1, x2], dim=1)
+        
+        x = self.fusion(x)
+        x = self.classifier(x)
+        return x
 
 
 if __name__ == '__main__':
     # Control switch: Set to True to enable training/validation, False to skip to testing only
-    ENABLE_TRAINING = False
-    
+    ENABLE_TRAINING = True
+    SNR = "30"
     # Dataset setup
-    train_dir = 'Dataset(Splitted)/snr_10/train'
-    val_dir = 'Dataset(Splitted)/snr_10/val'
-    test_dir = 'Dataset(Splitted)/snr_10/test'
+    train_dir = f'Dataset(Splitted)/snr_{SNR}/train'
+    val_dir = f'Dataset(Splitted)/snr_{SNR}/val'
+    test_dir = f'Dataset(Splitted)/snr_{SNR}/test'
 
     # Calculate dataset stats
-    temp_train = ScalogramDataset(train_dir)
+    temp_train = SignalDataset(train_dir)
     mean, std = calculate_dataset_stats(temp_train)
     print(f"Dataset stats - Mean: {mean}, Std: {std}")
 
-    # Data transforms
-    train_transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.Normalize(mean, std)
-    ])
-
-    val_test_transform = transforms.Compose([
-        transforms.Normalize(mean, std)
-    ])
+    # Data transforms - using custom SignalNormalize
+    train_transform = SignalNormalize(mean, std)
+    val_test_transform = SignalNormalize(mean, std)
 
     # Create datasets
-    train_dataset = ScalogramDataset(train_dir, train_transform)
-    val_dataset = ScalogramDataset(val_dir, val_test_transform)
-    test_dataset = ScalogramDataset(test_dir, val_test_transform)
+    train_dataset = SignalDataset(train_dir, train_transform)
+    val_dataset = SignalDataset(val_dir, val_test_transform)
+    test_dataset = SignalDataset(test_dir, val_test_transform)
 
     # Data loaders
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
 
-    # Model setup
+    # Model setup - Using DualStreamTransformer with Latent Attention
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(device)
-    model = DualStreamCNN(len(train_dataset.classes)).to(device)
-    print(sum(p.numel() for p in model.parameters()))
+    model = DualStreamTransformer(
+        num_classes=len(train_dataset.classes),
+        d_model=64,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=256,
+        num_latents=32,  # Number of learnable latent tokens
+        dropout=0.1,
+        use_latent_attention=True  # Set to False to disable latent attention
+    ).to(device)
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
     
     if ENABLE_TRAINING:
         # Optimizer and scheduler
@@ -224,7 +355,7 @@ if __name__ == '__main__':
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
-                torch.save(model.state_dict(), "model.pth")
+                torch.save(model.state_dict(), f"model{SNR}.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -235,7 +366,7 @@ if __name__ == '__main__':
         criterion = nn.CrossEntropyLoss()
 
     # Final evaluation
-    model.load_state_dict(torch.load("model.pth"))
+    model.load_state_dict(torch.load(f"model{SNR}.pth"))
     model.eval()
 
     all_preds = []
@@ -276,7 +407,7 @@ if __name__ == '__main__':
         plt.grid(True)
 
         plt.tight_layout()
-        plt.savefig("confusion_matrices_modelv10.png")
+        plt.savefig(f"confusion_matrices_{SNR}.png")
         plt.show()
     else:
         # Only confusion matrix when training is disabled
@@ -287,6 +418,6 @@ if __name__ == '__main__':
                     yticklabels=train_dataset.classes)
         plt.title("Confusion Matrix (Test Set)")
         plt.tight_layout()
-        plt.savefig("confusion_matrix_test_only.png")
+        plt.savefig(f"confusion_matrix_{SNR}.png")
         plt.show()
 
