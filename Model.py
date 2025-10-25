@@ -108,8 +108,8 @@ class DualStreamCNN(nn.Module):
 
 if __name__ == '__main__':
     # Dataset setup for training and validation
-    train_dir = 'Dataset(Splitted)/combined/train'
-    val_dir = 'Dataset(Splitted)/combined/val'
+    train_dir = 'Dataset(Splitted)/snr_30/train'
+    val_dir = 'Dataset(Splitted)/snr_30/val'
 
     # Calculate dataset stats
     temp_train = ScalogramDataset(train_dir)
