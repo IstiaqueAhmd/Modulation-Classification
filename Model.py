@@ -107,9 +107,10 @@ class DualStreamCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    # Dataset setup for training and validation
-    train_dir = 'Dataset(Splitted)/snr_30/train'
-    val_dir = 'Dataset(Splitted)/snr_30/val'
+    # Dataset setup
+    train_dir = 'Data/Splitted_Data/train'
+    val_dir = 'Data/Splitted_Data/val'
+    test_dir = 'Data/Splitted_Data/test'
 
     # Calculate dataset stats
     temp_train = ScalogramDataset(train_dir)
@@ -123,17 +124,19 @@ if __name__ == '__main__':
         transforms.Normalize(mean, std)
     ])
 
-    val_transform = transforms.Compose([
+    val_test_transform = transforms.Compose([
         transforms.Normalize(mean, std)
     ])
 
     # Create datasets
     train_dataset = ScalogramDataset(train_dir, train_transform)
-    val_dataset = ScalogramDataset(val_dir, val_transform)
+    val_dataset = ScalogramDataset(val_dir, val_test_transform)
+    test_dataset = ScalogramDataset(test_dir, val_test_transform)
 
     # Data loaders
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
 
     # Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,30 +219,54 @@ if __name__ == '__main__':
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             patience_counter = 0
-            torch.save(model.state_dict(), "model.pth")
+            torch.save(model.state_dict(), "modelv10.pth")
         else:
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch + 1}")
                 break
 
-    # Training complete - save final stats
-    print(f"\nTraining completed!")
-    print(f"Best validation accuracy: {best_val_acc:.4f}")
-    print(f"Model saved to: model.pth")
-    
-    # Plot training curves
-    plt.figure(figsize=(10, 6))
+    # Final evaluation
+    model.load_state_dict(torch.load("modelv10.pth"))
+    model.eval()
+
+    all_preds = []
+    all_labels = []
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, predicted = outputs.max(1)
+
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+
+    # Classification report
+    print("Classification Report:")
+    print(classification_report(all_labels, all_preds, target_names=train_dataset.classes))
+
+    # Confusion matrices
+    plt.figure(figsize=(15, 6))
+
+    # Raw counts
+    plt.subplot(1, 2, 1)
+    cm = confusion_matrix(all_labels, all_preds)
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=train_dataset.classes,
+                yticklabels=train_dataset.classes)
+    plt.title("Confusion Matrix")
+
+    #Loss track
+    plt.subplot(1, 2, 2)
     plt.plot(train_losses, label='Training Loss')
     plt.plot(val_losses, label='Validation Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
+    plt.title('Loss Curve')
     plt.legend()
     plt.grid(True)
+
     plt.tight_layout()
-    plt.savefig("training_curves.png")
+    plt.savefig("confusion_matrices_modelv10.png")
     plt.show()
-    
-    print("\nFor testing on different SNR levels, use test.py")
 
