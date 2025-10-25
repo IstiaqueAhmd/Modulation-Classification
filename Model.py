@@ -107,10 +107,13 @@ class DualStreamCNN(nn.Module):
 
 
 if __name__ == '__main__':
+    # Control switch: Set to True to enable training/validation, False to skip to testing only
+    ENABLE_TRAINING = False
+    
     # Dataset setup
-    train_dir = 'Data/Splitted_Data/train'
-    val_dir = 'Data/Splitted_Data/val'
-    test_dir = 'Data/Splitted_Data/test'
+    train_dir = 'Dataset(Splitted)/snr_10/train'
+    val_dir = 'Dataset(Splitted)/snr_10/val'
+    test_dir = 'Dataset(Splitted)/snr_10/test'
 
     # Calculate dataset stats
     temp_train = ScalogramDataset(train_dir)
@@ -143,91 +146,96 @@ if __name__ == '__main__':
     print(device)
     model = DualStreamCNN(len(train_dataset.classes)).to(device)
     print(sum(p.numel() for p in model.parameters()))
-    # Optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
-    criterion = nn.CrossEntropyLoss()
+    
+    if ENABLE_TRAINING:
+        # Optimizer and scheduler
+        optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
+        criterion = nn.CrossEntropyLoss()
 
-    # Store Losses
-    train_losses = []
-    val_losses = []
+        # Store Losses
+        train_losses = []
+        val_losses = []
 
-    # Training loop with early stopping
-    best_val_acc = 0.0
-    patience_counter = 0
-    patience = 7
-    num_epochs = 50
+        # Training loop with early stopping
+        best_val_acc = 0.0
+        patience_counter = 0
+        patience = 7
+        num_epochs = 50
 
-    for epoch in range(num_epochs):
-        model.train()
-        train_loss = 0.0
-        correct = 0
-        total = 0
+        for epoch in range(num_epochs):
+            model.train()
+            train_loss = 0.0
+            correct = 0
+            total = 0
 
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
-            correct += (predicted == labels).sum().item()
-            total += labels.size(0)
-
-        epoch_loss = train_loss / len(train_loader)
-        train_losses.append(epoch_loss)
-
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        val_correct = 0
-        val_total = 0
-
-        with torch.no_grad():
-            for inputs, labels in val_loader:
+            for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
+
+                optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
 
-                val_loss += loss.item()
+                train_loss += loss.item()
                 _, predicted = outputs.max(1)
-                val_correct += (predicted == labels).sum().item()
-                val_total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+                total += labels.size(0)
 
-        val_loss /= len(val_loader)
-        val_losses.append(val_loss)
+            epoch_loss = train_loss / len(train_loader)
+            train_losses.append(epoch_loss)
 
-        # Calculate metrics
-        train_acc = correct / total
-        val_acc = val_correct / val_total
-        current_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_acc)
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            val_correct = 0
+            val_total = 0
 
-        new_lr = optimizer.param_groups[0]['lr']
-        if new_lr != current_lr:
-            print(f"Learning rate reduced to {new_lr:.6f}")
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
 
-        print(f"Epoch {epoch + 1}/{num_epochs}")
-        print(f"Train Loss: {train_loss / len(train_loader):.4f} | Acc: {train_acc:.4f}")
-        print(f"Val Loss: {val_loss / len(val_loader):.4f} | Acc: {val_acc:.4f}\n")
+                    val_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    val_correct += (predicted == labels).sum().item()
+                    val_total += labels.size(0)
 
-        # Early stopping
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            patience_counter = 0
-            torch.save(model.state_dict(), "modelv10.pth")
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch + 1}")
-                break
+            val_loss /= len(val_loader)
+            val_losses.append(val_loss)
+
+            # Calculate metrics
+            train_acc = correct / total
+            val_acc = val_correct / val_total
+            current_lr = optimizer.param_groups[0]['lr']
+            scheduler.step(val_acc)
+
+            new_lr = optimizer.param_groups[0]['lr']
+            if new_lr != current_lr:
+                print(f"Learning rate reduced to {new_lr:.6f}")
+
+            print(f"Epoch {epoch + 1}/{num_epochs}")
+            print(f"Train Loss: {train_loss / len(train_loader):.4f} | Acc: {train_acc:.4f}")
+            print(f"Val Loss: {val_loss / len(val_loader):.4f} | Acc: {val_acc:.4f}\n")
+
+            # Early stopping
+            if val_acc > best_val_acc:
+                best_val_acc = val_acc
+                patience_counter = 0
+                torch.save(model.state_dict(), "model.pth")
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch + 1}")
+                    break
+    else:
+        print("Training skipped. Loading pre-trained model...")
+        criterion = nn.CrossEntropyLoss()
 
     # Final evaluation
-    model.load_state_dict(torch.load("modelv10.pth"))
+    model.load_state_dict(torch.load("model.pth"))
     model.eval()
 
     all_preds = []
@@ -246,27 +254,39 @@ if __name__ == '__main__':
     print(classification_report(all_labels, all_preds, target_names=train_dataset.classes))
 
     # Confusion matrices
-    plt.figure(figsize=(15, 6))
+    if ENABLE_TRAINING:
+        plt.figure(figsize=(15, 6))
 
-    # Raw counts
-    plt.subplot(1, 2, 1)
-    cm = confusion_matrix(all_labels, all_preds)
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=train_dataset.classes,
-                yticklabels=train_dataset.classes)
-    plt.title("Confusion Matrix")
+        # Raw counts
+        plt.subplot(1, 2, 1)
+        cm = confusion_matrix(all_labels, all_preds)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                    xticklabels=train_dataset.classes,
+                    yticklabels=train_dataset.classes)
+        plt.title("Confusion Matrix")
 
-    #Loss track
-    plt.subplot(1, 2, 2)
-    plt.plot(train_losses, label='Training Loss')
-    plt.plot(val_losses, label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Loss Curve')
-    plt.legend()
-    plt.grid(True)
+        #Loss track
+        plt.subplot(1, 2, 2)
+        plt.plot(train_losses, label='Training Loss')
+        plt.plot(val_losses, label='Validation Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Loss Curve')
+        plt.legend()
+        plt.grid(True)
 
-    plt.tight_layout()
-    plt.savefig("confusion_matrices_modelv10.png")
-    plt.show()
+        plt.tight_layout()
+        plt.savefig("confusion_matrices_modelv10.png")
+        plt.show()
+    else:
+        # Only confusion matrix when training is disabled
+        plt.figure(figsize=(8, 6))
+        cm = confusion_matrix(all_labels, all_preds)
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                    xticklabels=train_dataset.classes,
+                    yticklabels=train_dataset.classes)
+        plt.title("Confusion Matrix (Test Set)")
+        plt.tight_layout()
+        plt.savefig("confusion_matrix_test_only.png")
+        plt.show()
 
