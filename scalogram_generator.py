@@ -1,102 +1,146 @@
-#import necessary libraries
+"""
+==============================================================
+RadioML 2018.01A → Continuous Wavelet Scalogram Generator
+==============================================================
+
+Generates amplitude–phase scalograms from I/Q data using
+physically consistent wavelet parameters (1.5 MHz sampling).
+Each output file: [224×224×2] NumPy array (amplitude, phase).
+--------------------------------------------------------------
+Author : Istiaque (2025)
+Updated : Oct 2025
+==============================================================
+"""
+
 import os
 import numpy as np
-import scipy.io as sio
 import pywt
 import cv2
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 
-""" 
-This code generates Amplitude and Phase scalograms using I/Q data.
-"""
+# =====================
+# CONFIGURATION
+# =====================
+SNR_LEVELS = [30]   # SNRs to process
+CLASSES = [
+    "OOK", "4ASK", "8ASK",
+    "BPSK", "QPSK", "8PSK",
+    "16APSK", "64QAM",
+    "AM-SSB-WC", "AM-DSB-WC",
+    "FM", "GMSK", "OQPSK"
+]
 
-# Configuration parameters
-MAX_SCALOGRAMS = 1000  # Set to None to process all available scalograms, or specify a number
-SAVE_SAMPLES = True   # Set to False if you don't want to save sample images
-NUM_SAMPLES = 5       # Number of sample images to save (only used if SAVE_SAMPLES is True)
-SNR_LEVELS = [30, 20, 10, 0, -10, -20]  # All SNR levels to process
+BASE_INPUT_DIR = "Dataset"       # Root where /snr_xx/class/*.npy are stored
+BASE_OUTPUT_DIR = "Scalograms"   # Where scalograms will be saved
+SAVE_SAMPLES = True              # Save example images for sanity check
+NUM_SAMPLES = 5                  # # of sample images per modulation per SNR
+MAX_SCALOGRAMS = None            # Limit per class (None = all)
 
-def generateWaveletTransform(data_type, snr, max_scalograms=None, save_samples=False, num_samples=5):
-    input_dir = f'Dataset/snr_{snr}/{data_type}'
-    output_dir = f'Scalograms/snr_{snr}/{data_type}'
-    samples_dir = f'ScalogramSamples/snr_{snr}/{data_type}'
+
+# =============================================================
+#   HELPER FUNCTIONS
+# =============================================================
+
+def compute_cwt(signal, sampling_rate=1.5e6, wavelet='cmor1.5-0.5'):
+    """Compute CWT for a 1D signal using correct physical sampling."""
+    sampling_period = 1 / sampling_rate
+    scales = np.logspace(-1, 1.3, num=200)  # tuned for radio bands
+    coeffs, freqs = pywt.cwt(signal, scales, wavelet, sampling_period=sampling_period)
+    coeffs = np.abs(coeffs)
+    return coeffs
+
+
+def normalize_stack(cwt_amp, cwt_phase):
+    """Normalize amplitude and phase jointly (0–1 range)."""
+    stacked = np.stack([cwt_amp, cwt_phase], axis=0)
+    stacked = (stacked - stacked.min()) / (stacked.max() - stacked.min() + 1e-8)
+    return stacked
+
+
+def save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr):
+    """Save sample amplitude & phase images for inspection."""
+    amp_path = os.path.join(sample_dir, f"{base_filename}_amp_snr{snr}.png")
+    phase_path = os.path.join(sample_dir, f"{base_filename}_phase_snr{snr}.png")
+
+    plt.imsave(amp_path, cwt_amp, cmap='jet', vmin=0, vmax=1)
+    plt.imsave(phase_path, cwt_phase, cmap='jet', vmin=0, vmax=1)
+
+
+# =============================================================
+#   MAIN GENERATION FUNCTION
+# =============================================================
+
+def generate_wavelet_scalograms(data_type, snr,
+                                max_scalograms=None,
+                                save_samples=False,
+                                num_samples=5):
+    input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", data_type)
+    output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", data_type)
+    sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", data_type)
 
     os.makedirs(output_dir, exist_ok=True)
     if save_samples:
-        os.makedirs(samples_dir, exist_ok=True)
+        os.makedirs(sample_dir, exist_ok=True)
 
-    sample_count = 0
     scalogram_count = 0
+    sample_count = 0
+
+    files = [f for f in os.listdir(input_dir) if f.endswith('.npy')]
+    for filename in files:
+        if max_scalograms is not None and scalogram_count >= max_scalograms:
+            break
+
+        filepath = os.path.join(input_dir, filename)
+        data = np.load(filepath)
+
+        # Separate I and Q components
+        I, Q = data[:, 0], data[:, 1]
+        amplitude = np.sqrt(I**2 + Q**2)
+        phase = np.arctan2(Q, I)
+
+        # Compute CWTs
+        cwt_amp = compute_cwt(amplitude)
+        cwt_phase = compute_cwt(phase)
+
+        # Resize for CNN input
+        cwt_amp = cv2.resize(cwt_amp, (224, 224), interpolation=cv2.INTER_LANCZOS4)
+        cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
+
+        # Normalize jointly
+        stacked = normalize_stack(cwt_amp, cwt_phase)
+        stacked = np.transpose(stacked, (1, 2, 0))  # H×W×C
+
+        # Save scalogram
+        base_filename = os.path.splitext(filename)[0]
+        output_path = os.path.join(output_dir, f"{base_filename}_snr{snr}.npy")
+        np.save(output_path, stacked.astype(np.float32))
+        scalogram_count += 1
+
+        # Save sample visualization
+        if save_samples and sample_count < num_samples:
+            save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr)
+            sample_count += 1
+
+    print(f"[✓] {data_type} | SNR {snr} → {scalogram_count} scalograms generated.")
 
 
-    for filename in os.listdir(input_dir):
-        if filename.endswith('.npy'):
-            # Check if we've reached the maximum number of scalograms to process
-            if max_scalograms is not None and scalogram_count >= max_scalograms:
-                break
-                
-            frame_path = os.path.join(input_dir, filename)
-            data = np.load(frame_path)
+# =============================================================
+#   MAIN SCRIPT EXECUTION
+# =============================================================
 
-            I = data[:, 0]  # First Col: I component (1024 samples)
-            Q = data[:, 1]  # Second Col: Q component (1024 samples) 
+if __name__ == "__main__":
+    for snr in SNR_LEVELS:
+        print(f"\n{'='*60}")
+        print(f" Processing SNR Level: {snr} dB ")
+        print(f"{'='*60}\n")
+        for modulation in CLASSES:
+            generate_wavelet_scalograms(
+                modulation,
+                snr,
+                max_scalograms=MAX_SCALOGRAMS,
+                save_samples=SAVE_SAMPLES,
+                num_samples=NUM_SAMPLES
+            )
 
-            amplitude = np.sqrt(I ** 2 + Q ** 2)
-            phase = np.arctan2(Q, I)
-
-            wavelet = 'cmor1.5-0.5'
-            scales = np.logspace(0.5, 2, num=200)
-
-            def compute_cwt(signal):
-                coeffs, _ = pywt.cwt(signal, scales, wavelet, sampling_period=1 / 1000)
-                coeffs = np.abs(coeffs)
-                scaler = MinMaxScaler()
-                return scaler.fit_transform(coeffs)
-
-            cwt_amplitude = compute_cwt(amplitude)
-            cwt_phase = compute_cwt(phase)
-
-            cwt_amplitude = cv2.resize(cwt_amplitude, (224, 224), interpolation=cv2.INTER_LANCZOS4)
-            cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
-
-            stacked_scalogram = np.stack([cwt_amplitude, cwt_phase], axis=-1)
-
-            # Add SNR to the filename
-            base_filename = os.path.splitext(filename)[0]
-            output_filename = f"{base_filename}_snr_{snr}.npy"
-            output_path = os.path.join(output_dir, output_filename)
-            np.save(output_path, stacked_scalogram.astype(np.float32))
-            scalogram_count += 1
-
-            if save_samples and sample_count < num_samples:
-                amp_img_path = os.path.join(samples_dir, f"{base_filename}_snr_{snr}_amp.png")
-                phase_img_path = os.path.join(samples_dir, f"{base_filename}_snr_{snr}_phase.png")
-
-                plt.imsave(amp_img_path, cwt_amplitude, cmap='gray', vmin=0, vmax=1)
-                plt.imsave(phase_img_path, cwt_phase, cmap='gray', vmin=0, vmax=1)
-
-                sample_count += 1
-    if save_samples:
-        print(f"Stacked wavelet transforms saved for {data_type}: {scalogram_count} scalograms, including {sample_count} raw sample images.")
-    else:
-        print(f"Stacked wavelet transforms saved for {data_type}: {scalogram_count} scalograms.")
-
-
-# Run for multiple modulation types
-classes = [
-  "OOK", "4ASK", "8ASK",
-  "BPSK", "QPSK", "8PSK", 
-  "16APSK", "64QAM", 
-  "AM-SSB-WC","AM-DSB-WC",
-  "FM", "GMSK", "OQPSK"
-]
-
-# Process all SNR levels
-for snr in SNR_LEVELS:
-    print(f"\n{'='*50}")
-    print(f"Processing SNR level: {snr}")
-    print(f"{'='*50}\n")
-    for data_type in classes:
-        generateWaveletTransform(data_type, snr, max_scalograms=MAX_SCALOGRAMS, save_samples=SAVE_SAMPLES, num_samples=NUM_SAMPLES)
-
+    print("\nAll scalograms generated successfully ✅")
