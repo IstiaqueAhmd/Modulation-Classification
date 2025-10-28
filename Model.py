@@ -207,7 +207,7 @@ class DualStreamCNN(nn.Module):
 if __name__ == '__main__':
     # Training switch - Set to False to skip training and only evaluate
     TRAIN = True
-    SNR = "30"
+    SNR = "20"
     
     # Dataset setup - Load directly from Scalograms folder
     data_dir = f'Scalograms/snr_{SNR}'
@@ -265,6 +265,14 @@ if __name__ == '__main__':
         patience_counter = 0
         patience = 7
         num_epochs = 50
+        
+        # History tracking for plotting
+        history = {
+            'train_loss': [],
+            'train_acc': [],
+            'val_loss': [],
+            'val_acc': []
+        }
 
         for epoch in range(num_epochs):
             model.train()
@@ -304,8 +312,17 @@ if __name__ == '__main__':
                     val_total += labels.size(0)
 
             # Calculate metrics
+            train_loss_avg = train_loss / len(train_loader)
+            val_loss_avg = val_loss / len(val_loader)
             train_acc = correct / total
             val_acc = val_correct / val_total
+            
+            # Store history
+            history['train_loss'].append(train_loss_avg)
+            history['train_acc'].append(train_acc)
+            history['val_loss'].append(val_loss_avg)
+            history['val_acc'].append(val_acc)
+            
             current_lr = optimizer.param_groups[0]['lr']
             scheduler.step(val_acc)
 
@@ -314,24 +331,54 @@ if __name__ == '__main__':
                 print(f"Learning rate reduced to {new_lr:.6f}")
 
             print(f"Epoch {epoch + 1}/{num_epochs}")
-            print(f"Train Loss: {train_loss / len(train_loader):.4f} | Acc: {train_acc:.4f}")
-            print(f"Val Loss: {val_loss / len(val_loader):.4f} | Acc: {val_acc:.4f}\n")
+            print(f"Train Loss: {train_loss_avg:.4f} | Acc: {train_acc:.4f}")
+            print(f"Val Loss: {val_loss_avg:.4f} | Acc: {val_acc:.4f}\n")
 
             # Early stopping
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
-                torch.save(model.state_dict(), "Model.pth")
+                torch.save(model.state_dict(), f"weights_snr{SNR}.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
                     print(f"Early stopping at epoch {epoch + 1}")
                     break
+        
+        # Plot training history
+        print("Plotting training curves...")
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        
+        epochs_range = range(1, len(history['train_loss']) + 1)
+        
+        # Loss plot
+        ax1.plot(epochs_range, history['train_loss'], 'b-', label='Training Loss', linewidth=2)
+        ax1.plot(epochs_range, history['val_loss'], 'r-', label='Validation Loss', linewidth=2)
+        ax1.set_xlabel('Epoch', fontsize=12)
+        ax1.set_ylabel('Loss', fontsize=12)
+        ax1.set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=10)
+        ax1.grid(True, alpha=0.3)
+        
+        # Accuracy plot
+        ax2.plot(epochs_range, history['train_acc'], 'b-', label='Training Accuracy', linewidth=2)
+        ax2.plot(epochs_range, history['val_acc'], 'r-', label='Validation Accuracy', linewidth=2)
+        ax2.set_xlabel('Epoch', fontsize=12)
+        ax2.set_ylabel('Accuracy', fontsize=12)
+        ax2.set_title('Training and Validation Accuracy', fontsize=14, fontweight='bold')
+        ax2.legend(fontsize=10)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig('training_curves.png', dpi=300, bbox_inches='tight')
+        print("Training curves saved to 'training_curves.png'")
+        plt.show()
+        
     else:
         print("Training skipped. Loading existing model...")
 
     # Final evaluation
-    model.load_state_dict(torch.load("Model.pth"))
+    model.load_state_dict(torch.load(f"weights_snr{SNR}.pth"))
     model.eval()
 
     all_preds = []
@@ -361,6 +408,6 @@ if __name__ == '__main__':
     plt.title("Confusion Matrix")
 
     plt.tight_layout()
-    plt.savefig("Model.png")
+    plt.savefig(f"Confusion_Matrix_snr{SNR}.png")
     plt.show()
 
