@@ -303,8 +303,6 @@ if __name__ == '__main__':
 
     # Data transforms
     train_transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
         transforms.Normalize(mean, std)
     ])
 
