@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 # =====================
 # CONFIGURATION
 # =====================
-SNR_LEVELS = [30]   # SNRs to process
+SNR_LEVELS = [20]   # SNRs to process
 CLASSES = [
     "OOK", "4ASK", "8ASK",
     "BPSK", "QPSK", "8PSK",
@@ -35,7 +35,7 @@ BASE_INPUT_DIR = "Dataset"       # Root where /snr_xx/class/*.npy are stored
 BASE_OUTPUT_DIR = "Scalograms"   # Where scalograms will be saved
 SAVE_SAMPLES = True              # Save example images for sanity check
 NUM_SAMPLES = 5                  # # of sample images per modulation per SNR
-MAX_SCALOGRAMS = None            # Limit per class (None = all)
+MAX_SCALOGRAMS = 4000            # Limit per class (None = all)
 
 
 # =============================================================
@@ -59,13 +59,16 @@ def normalize_stack(cwt_amp, cwt_phase):
 
 
 def save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr):
-    """Save sample amplitude & phase images for inspection."""
+    """Save grayscale amplitude & phase sample images."""
     amp_path = os.path.join(sample_dir, f"{base_filename}_amp_snr{snr}.png")
     phase_path = os.path.join(sample_dir, f"{base_filename}_phase_snr{snr}.png")
 
-    plt.imsave(amp_path, cwt_amp, cmap='jet', vmin=0, vmax=1)
-    plt.imsave(phase_path, cwt_phase, cmap='jet', vmin=0, vmax=1)
+    # Scale to 0–255 for saving as grayscale PNG
+    amp_img = (255 * (cwt_amp - cwt_amp.min()) / (cwt_amp.max() - cwt_amp.min() + 1e-8)).astype(np.uint8)
+    phase_img = (255 * (cwt_phase - cwt_phase.min()) / (cwt_phase.max() - cwt_phase.min() + 1e-8)).astype(np.uint8)
 
+    cv2.imwrite(amp_path, amp_img)
+    cv2.imwrite(phase_path, phase_img)
 
 # =============================================================
 #   MAIN GENERATION FUNCTION
