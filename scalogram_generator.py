@@ -52,10 +52,10 @@ CLASSES = ['32PSK',
 
 
 BASE_INPUT_DIR = "Dataset"      # Root where /snr_xx/class/*.npy are stored
-BASE_OUTPUT_DIR = "Scalograms_ComplexCWT" # NEW DIR: Where scalograms will be saved
+BASE_OUTPUT_DIR = "Scalograms" # NEW DIR: Where scalograms will be saved
 SAVE_SAMPLES = True           # Save example images for sanity check
 NUM_SAMPLES = 5               # # of sample images per modulation per SNR
-MAX_SCALOGRAMS = None         # Limit per class (None = all)
+MAX_SCALOGRAMS = 1000         # Limit per class (None = all)
 
 
 # =============================================================
@@ -105,7 +105,7 @@ def generate_wavelet_scalograms(data_type, snr,
     
     input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", data_type)
     output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", data_type)
-    sample_dir = os.path.join("ScalogramSamples_ComplexCWT", f"snr_{snr}", data_type)
+    sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", data_type)
 
     os.makedirs(output_dir, exist_ok=True)
     if save_samples:
@@ -146,7 +146,7 @@ def generate_wavelet_scalograms(data_type, snr,
         # Save the raw float32 scalogram
         base_filename = os.path.splitext(filename)[0]
         output_path = os.path.join(output_dir, f"{base_filename}_snr{snr}.npy")
-        np.save(output_path, stacked.astype(np.float33))
+        np.save(output_path, stacked.astype(np.float32))
         scalogram_count += 1
 
         # Save sample visualization
