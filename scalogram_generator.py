@@ -1,19 +1,17 @@
 """
 ==============================================================
-RadioML 2018.01A -> Complex CWT Scalogram Generator
+RadioML 2018.01A -> Complex Analytic Wavelet Scalogram Generator
 ==============================================================
 
-Generates amplitude–phase scalograms from I/Q data using
-physically consistent wavelet parameters (1.5 MHz sampling).
+Generates true amplitude & phase scalograms from I/Q data
+by computing the CWT on the complex analytic signal.
+This avoids 'arctan2' phase-wrapping artifacts.
 
-This version computes the CWT on the COMPLEX I+jQ signal
-and extracts amplitude/phase from the resulting complex
-coefficients to avoid 'arctan2' phase-wrapping artifacts.
-
-Each output file: [224×224×2] NumPy array (amplitude, phase).
+Each output file: [224x224x2] NumPy array (amplitude, phase).
+Data is saved as raw float32, NO 0-1 normalization is applied.
 --------------------------------------------------------------
 Author : Istiaque (2025)
-Updated : Oct 2025 (Gemini modification for complex CWT)
+Updated: Oct 2025 (Revised to use complex CWT)
 ==============================================================
 """
 
@@ -26,7 +24,7 @@ import matplotlib.pyplot as plt
 # =====================
 # CONFIGURATION
 # =====================
-SNR_LEVELS = [30]  # SNRs to process
+SNR_LEVELS = [30]     # SNRs to process
 CLASSES = ['32PSK',
  '16APSK',
  '32QAM',
@@ -54,73 +52,60 @@ CLASSES = ['32PSK',
 
 
 BASE_INPUT_DIR = "Dataset"      # Root where /snr_xx/class/*.npy are stored
-BASE_OUTPUT_DIR = "Scalograms"  # Where scalograms will be saved
-SAVE_SAMPLES = True             # Save example images for sanity check
-NUM_SAMPLES = 5                 # # of sample images per modulation per SNR
-MAX_SCALOGRAMS = None           # Limit per class (None = all)
-TARGET_SIZE = (224, 224)        # Target H, W for CNN input
+BASE_OUTPUT_DIR = "Scalograms_ComplexCWT" # NEW DIR: Where scalograms will be saved
+SAVE_SAMPLES = True           # Save example images for sanity check
+NUM_SAMPLES = 5               # # of sample images per modulation per SNR
+MAX_SCALOGRAMS = None         # Limit per class (None = all)
 
 
 # =============================================================
-#   HELPER FUNCTIONS (MODIFIED FOR COMPLEX CWT)
+#   HELPER FUNCTIONS
 # =============================================================
 
 def compute_complex_cwt(signal, sampling_rate=1.5e6, wavelet='cmor1.5-0.5'):
     """
-    Compute CWT for a 1D *complex* signal and return complex coefficients.
+    Compute CWT for a 1D *complex* signal.
+    Returns the complex coefficients.
     """
     sampling_period = 1 / sampling_rate
-    # These scales were tuned in the original script
+    # These scales may need tuning for your specific problem
     scales = np.logspace(-1, 1.3, num=200) 
     
-    # pywt.cwt handles complex input (I+jQ) automatically
-    # This returns [num_scales, signal_length] complex coefficients
+    # Pass the complex signal directly
     coeffs, freqs = pywt.cwt(signal, scales, wavelet, sampling_period=sampling_period)
     
+    # Return the complex coefficients
     return coeffs
 
 
-def normalize_scalograms(cwt_amp, cwt_phase):
-    """
-    Normalize amplitude (MinMax 0-1) and phase ([-pi, pi] -> 0-1) 
-    independently.
-    """
-    # Normalize amplitude using Min-Max
-    amp_norm = (cwt_amp - cwt_amp.min()) / (cwt_amp.max() - cwt_amp.min() + 1e-8)
-    
-    # Normalize phase from [-pi, pi] to [0, 1]
-    phase_norm = (cwt_phase + np.pi) / (2 * np.pi)
-    
-    # Stack: (C, H, W)
-    stacked = np.stack([amp_norm, phase_norm], axis=0)
-    return stacked
-
-
 def save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr):
-    """Save grayscale amplitude & phase sample images."""
+    """
+    Save grayscale amplitude & phase sample images.
+    This function *only* scales for image saving (0-255).
+    It does NOT affect the saved .npy data.
+    """
     amp_path = os.path.join(sample_dir, f"{base_filename}_amp_snr{snr}.png")
     phase_path = os.path.join(sample_dir, f"{base_filename}_phase_snr{snr}.png")
 
-    # Scale raw amplitude to 0–255 for saving as grayscale PNG
+    # Scale to 0–255 for saving as grayscale PNG
     amp_img = (255 * (cwt_amp - cwt_amp.min()) / (cwt_amp.max() - cwt_amp.min() + 1e-8)).astype(np.uint8)
-    
-    # Scale raw phase (now [-pi, pi]) to 0-255
-    phase_img = (255 * (cwt_phase + np.pi) / (2 * np.pi + 1e-8)).astype(np.uint8)
+    phase_img = (255 * (cwt_phase - cwt_phase.min()) / (cwt_phase.max() - cwt_phase.min() + 1e-8)).astype(np.uint8)
 
     cv2.imwrite(amp_path, amp_img)
     cv2.imwrite(phase_path, phase_img)
 
 # =============================================================
-#   MAIN GENERATION FUNCTION (MODIFIED FOR COMPLEX CWT)
+#   MAIN GENERATION FUNCTION
 # =============================================================
 
 def generate_wavelet_scalograms(data_type, snr,
                                 max_scalograms=None,
                                 save_samples=False,
                                 num_samples=5):
+    
     input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", data_type)
     output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", data_type)
-    sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", data_type)
+    sample_dir = os.path.join("ScalogramSamples_ComplexCWT", f"snr_{snr}", data_type)
 
     os.makedirs(output_dir, exist_ok=True)
     if save_samples:
@@ -144,36 +129,31 @@ def generate_wavelet_scalograms(data_type, snr,
         complex_signal = I + 1j * Q
 
         # --- KEY CHANGE: Compute CWT on complex signal ---
-        # This returns complex-valued coefficients
         complex_coeffs = compute_complex_cwt(complex_signal)
 
-        # --- KEY CHANGE: Extract amp/phase from complex coefficients ---
+        # --- KEY CHANGE: Get true Amp and Phase from complex coeffs ---
         cwt_amp = np.abs(complex_coeffs)
-        cwt_phase = np.angle(complex_coeffs) # Range [-pi, pi]
+        cwt_phase = np.angle(complex_coeffs) # This is now unwrapped
 
         # Resize for CNN input
-        # Note: CV2 expects (H, W), so we resize the [scales, time] matrix
-        cwt_amp = cv2.resize(cwt_amp, TARGET_SIZE, interpolation=cv2.INTER_LANCZOS4)
-        cwt_phase = cv2.resize(cwt_phase, TARGET_SIZE, interpolation=cv2.INTER_LANCZOS4)
+        cwt_amp = cv2.resize(cwt_amp, (224, 224), interpolation=cv2.INTER_LANCZOS4)
+        cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
 
-        # Save sample visualization (uses raw resized amp/phase)
-        if save_samples and sample_count < num_samples:
-            base_filename = os.path.splitext(filename)[0]
-            save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr)
-            sample_count += 1
+        # --- KEY CHANGE: Stack channels *without* 0-1 normalization ---
+        stacked = np.stack([cwt_amp, cwt_phase], axis=0) # C, H, W
+        stacked = np.transpose(stacked, (1, 2, 0))      # H, W, C
 
-        # Normalize independently
-        # Returns shape (C, H, W) = (2, 224, 224)
-        stacked = normalize_scalograms(cwt_amp, cwt_phase)
-        
-        # Transpose to H×W×C (224, 224, 2) for consistency with original script
-        stacked = np.transpose(stacked, (1, 2, 0)) 
-
-        # Save scalogram
+        # Save the raw float32 scalogram
         base_filename = os.path.splitext(filename)[0]
         output_path = os.path.join(output_dir, f"{base_filename}_snr{snr}.npy")
-        np.save(output_path, stacked.astype(np.float32))
+        np.save(output_path, stacked.astype(np.float33))
         scalogram_count += 1
+
+        # Save sample visualization
+        if save_samples and sample_count < num_samples:
+            # Pass the *non-normalized* data for visualization
+            save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr)
+            sample_count += 1
 
     print(f"[✓] {data_type} | SNR {snr} → {scalogram_count} scalograms generated.")
 
@@ -186,6 +166,7 @@ if __name__ == "__main__":
     for snr in SNR_LEVELS:
         print(f"\n{'='*60}")
         print(f" Processing SNR Level: {snr} dB ")
+        print(f" Output Directory: {BASE_OUTPUT_DIR} ")
         print(f"{'='*60}\n")
         for modulation in CLASSES:
             generate_wavelet_scalograms(
@@ -196,4 +177,4 @@ if __name__ == "__main__":
                 num_samples=NUM_SAMPLES
             )
 
-    print("\nAll complex CWT scalograms generated successfully ✅")
+    print("\nAll scalograms generated successfully ✅")
