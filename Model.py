@@ -2,7 +2,6 @@ import os
 import random
 import numpy as np
 import torch
-import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -55,26 +54,26 @@ class ScalogramDataset(Dataset):
 
     def __getitem__(self, idx):
         file_path, label = self.data[idx]
-        scalogram = np.load(file_path).transpose(2, 0, 1)
+        
+        # Load the (H, W, 1) .npy file
+        scalogram = np.load(file_path) 
+        
+        # Transpose from (H, W, C) to (C, H, W) for PyTorch
+        # This correctly handles (224, 224, 1) -> (1, 224, 224)
+        scalogram = scalogram.transpose(2, 0, 1)
+        
         scalogram = torch.tensor(scalogram, dtype=torch.float32)
+        
         if self.transform:
             scalogram = self.transform(scalogram)
+  
         return scalogram, label
 
 
 def create_train_val_test_split(root_dir, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
     """
     Split dataset into train/val/test indices without copying files
-    
-    Args:
-        root_dir: Path to the scalograms folder
-        train_ratio: Proportion for training set
-        val_ratio: Proportion for validation set
-        test_ratio: Proportion for test set
-        seed: Random seed for reproducibility
-        
-    Returns:
-        train_indices, val_indices, test_indices
+    (This function is unchanged)
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -140,16 +139,24 @@ def create_train_val_test_split(root_dir, train_ratio=0.8, val_ratio=0.1, test_r
     
     return global_train_indices, global_val_indices, global_test_indices
 
-
+# ==========================================================
+# CHANGED: Updated to calculate stats for a single channel
+# ==========================================================
 def calculate_dataset_stats(dataset):
+    """Calculates mean and std for a single-channel dataset."""
     loader = DataLoader(dataset, batch_size=64, num_workers=4)
-    mean = torch.zeros(2)
-    std = torch.zeros(2)
+    mean = 0.0
+    std = 0.0
     for inputs, _ in loader:
-        for i in range(2):
-            mean[i] += inputs[:, i].mean()
-            std[i] += inputs[:, i].std()
-    return (mean / len(loader)).tolist(), (std / len(loader)).tolist()
+        # inputs shape is [B, 1, H, W]
+        mean += inputs.mean()
+        std += inputs.std()
+        
+    mean /= len(loader)
+    std /= len(loader)
+    
+    # Return as lists to be compatible with transforms.Normalize
+    return [mean.item()], [std.item()]
 
 
 # ------------------------
@@ -205,68 +212,42 @@ class SEBlock(nn.Module):
 
 
 # ------------------------
-# One Stream (I or Q)
+# Feature Extraction Stream
+# (Unchanged - this is the backbone)
 # ------------------------
 def make_stream():
     return nn.Sequential(
-        # FIX 1: Removed stride=2 to capture more detail
-        nn.Conv2d(1, 16, 7, 1, 3, bias=False),  # WAS: stride=2
+        # Takes 1-channel input
+        nn.Conv2d(1, 16, 7, 1, 3, bias=False), # Stride=1
         nn.BatchNorm2d(16),
         nn.ReLU(inplace=True),
-        nn.MaxPool2d(3, 2),    # First downsampling: 224 -> 111
+        nn.MaxPool2d(3, 2),     # 224 -> 111
 
         DSConv(16, 32),
         ResidualDSBlock(32),
-        nn.MaxPool2d(3, 2),    # Second downsampling: 111 -> 55
+        nn.MaxPool2d(3, 2),     # 111 -> 55
 
         DSConv(32, 64),
         ResidualDSBlock(64),
         SEBlock(64),
-        nn.MaxPool2d(3, 2)     # Third downsampling: 55 -> 27
+        nn.MaxPool2d(3, 2)      # 55 -> 27
+        # Output is [B, 64, 27, 27]
     )
 
 
-# ------------------------
-# Cross Attention Fusion
-# ------------------------
-class CrossAttention(nn.Module):
-    def __init__(self, ch):
-        super().__init__()
-        self.query = nn.Conv2d(ch, ch // 2, 1)
-        self.key = nn.Conv2d(ch, ch // 2, 1)
-        self.value = nn.Conv2d(ch, ch, 1)
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, a, p):
-        # flatten spatial dimensions
-        B, C, H, W = a.shape
-        Q = self.query(a).flatten(2)          # [B, C/2, HW]
-        K = self.key(p).flatten(2)            # [B, C/2, HW]
-        V = self.value(p).flatten(2)          # [B, C, HW]
-        attn = self.softmax(torch.bmm(Q.transpose(1, 2), K))  # [B, HW, HW]
-        out = torch.bmm(V, attn.transpose(1, 2)).view(B, C, H, W)
-        return out + a
-
-
-# ------------------------
-# Dual-Stream CWTNet
-# ------------------------
-class DualStreamCWTNet(nn.Module):
+# ==========================================================
+# CHANGED: New Single-Stream Model
+# ==========================================================
+class SingleStreamCWTNet(nn.Module):
     def __init__(self, num_classes, dropout=0.4):
         super().__init__()
-        # Renamed for clarity
-        self.stream_i = make_stream()
-        self.stream_q = make_stream()
         
-        # FIX 2: Replaced Cross-Attention with a Merge layer
-        # This 1x1 Conv will merge the concatenated 64+64=128 channels
-        self.merge = nn.Sequential(
-            nn.Conv2d(128, 64, 1, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
-        )
-
-        self.fuse = nn.Sequential(
+        # 1. Feature Extraction Backbone
+        self.stream = make_stream()
+        
+        # 2. Classification Head
+        # Re-uses the 'fuse' and 'classifier' blocks from your old model
+        self.head = nn.Sequential(
             ResidualDSBlock(64),
             SEBlock(64),
             nn.AdaptiveAvgPool2d(1),
@@ -281,32 +262,27 @@ class DualStreamCWTNet(nn.Module):
         )
 
     def forward(self, x):
-        # x[:, 0:1] is the I-scalogram
-        # x[:, 1:2] is the Q-scalogram
+        # x is already [B, 1, H, W]
         
-        # 1. Process streams in parallel (This is the "Dual-Stream" part)
-        xi = self.stream_i(x[:, 0:1])  # I-Features
-        xq = self.stream_q(x[:, 1:2])  # Q-Features
-
-        # 2. Fuse by concatenating (This is the "Fusion" part)
-        # We stack them on the channel dimension (dim=1)
-        fused = torch.cat([xi, xq], dim=1)  # Shape: [B, 128, H, W]
+        # 1. Process through the single stream
+        x = self.stream(x)
         
-        # 3. Merge the fused features
-        fused = self.merge(fused)           # Shape: [B, 64, H, W]
+        # 2. Process through the classification head
+        x = self.head(x)
         
-        # 4. Classify
-        fused = self.fuse(fused)
-        return self.classifier(fused)
+        # 3. Classify
+        return self.classifier(x)
 
 
 if __name__ == '__main__':
     # Training switch - Set to False to skip training and only evaluate
     TRAIN = True
-    SNR = "20"
+    SNR = "30"
     
-    # Dataset setup - Load directly from Scalograms folder
-    data_dir = f'Scalograms/snr_{SNR}'
+    # ==========================================================
+    # CHANGED: Point to new single-channel dataset directory
+    # ==========================================================
+    data_dir = f'Scalograms_AmpOnly/snr_{SNR}'
     
     # Split ratios
     train_ratio = 0.8
@@ -321,6 +297,10 @@ if __name__ == '__main__':
     
     # Calculate dataset stats using training data only
     temp_train = ScalogramDataset(data_dir, indices=train_indices)
+    
+    # ==========================================================
+    # CHANGED: Uses new 1-channel stat calculation
+    # ==========================================================
     mean, std = calculate_dataset_stats(temp_train)
     print(f"Dataset stats - Mean: {mean}, Std: {std}")
 
@@ -345,13 +325,24 @@ if __name__ == '__main__':
 
     # Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
-    model = DualStreamCWTNet(len(train_dataset.classes)).to(device)
-    print(sum(p.numel() for p in model.parameters()))
+    print(f"Using device: {device}")
+    
+    # ==========================================================
+    # CHANGED: Use the new SingleStreamCWTNet
+    # ==========================================================
+    model = SingleStreamCWTNet(len(train_dataset.classes)).to(device)
+    
+    print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    
     # Optimizer and scheduler
     optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
     criterion = nn.CrossEntropyLoss()
+    
+    # ==========================================================
+    # CHANGED: Updated model save path
+    # ==========================================================
+    model_path = f"weights_snr{SNR}_single.pth"
 
     if TRAIN:
         # Training loop with early stopping
@@ -368,6 +359,7 @@ if __name__ == '__main__':
             'val_acc': []
         }
 
+        print("\nStarting training...")
         for epoch in range(num_epochs):
             model.train()
             train_loss = 0.0
@@ -432,7 +424,7 @@ if __name__ == '__main__':
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
-                torch.save(model.state_dict(), f"weights_snr{SNR}.pth")
+                torch.save(model.state_dict(), model_path)
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -464,15 +456,16 @@ if __name__ == '__main__':
         ax2.grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig('training_curves.png', dpi=300, bbox_inches='tight')
-        print("Training curves saved to 'training_curves.png'")
-        plt.show()
+        plt.savefig(f'training_curves_snr{SNR}_single.png', dpi=300, bbox_inches='tight')
+        print(f"Training curves saved to 'training_curves_snr{SNR}_single.png'")
+        # plt.show() # Commented out to run headlessly if needed
         
     else:
         print("Training skipped. Loading existing model...")
 
     # Final evaluation
-    model.load_state_dict(torch.load(f"weights_snr{SNR}.pth"))
+    print(f"\nLoading best model from {model_path} for final evaluation...")
+    model.load_state_dict(torch.load(model_path))
     model.eval()
 
     all_preds = []
@@ -487,21 +480,28 @@ if __name__ == '__main__':
             all_labels.extend(labels.cpu().numpy())
 
     # Classification report
-    print("Classification Report:")
+    print("\n" + "="*60)
+    print("Classification Report (Test Set)")
+    print("="*60)
     print(classification_report(all_labels, all_preds, target_names=train_dataset.classes))
 
-    # Confusion matrices
-    plt.figure(figsize=(15, 6))
+    # Confusion matrix
+    print("Generating confusion matrix...")
+    plt.figure(figsize=(16, 14))
 
-    # Raw counts
-    plt.subplot(1, 1, 1)
     cm = confusion_matrix(all_labels, all_preds)
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                 xticklabels=train_dataset.classes,
                 yticklabels=train_dataset.classes)
-    plt.title("Confusion Matrix")
+    plt.title(f"Confusion Matrix - SNR {SNR} dB (Single Channel)", fontsize=16, fontweight='bold')
+    plt.ylabel('True Label', fontsize=12)
+    plt.xlabel('Predicted Label', fontsize=12)
+    plt.xticks(rotation=45, ha='right')
+    plt.yticks(rotation=0)
 
     plt.tight_layout()
-    plt.savefig(f"Confusion_Matrix_snr{SNR}.png")
-    plt.show()
-
+    plt.savefig(f"Confusion_Matrix_snr{SNR}_single.png", dpi=300, bbox_inches='tight')
+    print(f"Confusion matrix saved to 'Confusion_Matrix_snr{SNR}_single.png'")
+    # plt.show() # Commented out to run headlessly if needed
+    
+    print("\nProcess finished successfully. ✅")
