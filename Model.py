@@ -205,23 +205,24 @@ class SEBlock(nn.Module):
 
 
 # ------------------------
-# One Stream (Amplitude or Phase)
+# One Stream (I or Q)
 # ------------------------
 def make_stream():
     return nn.Sequential(
-        nn.Conv2d(1, 16, 7, 2, 3, bias=False),
+        # FIX 1: Removed stride=2 to capture more detail
+        nn.Conv2d(1, 16, 7, 1, 3, bias=False),  # WAS: stride=2
         nn.BatchNorm2d(16),
         nn.ReLU(inplace=True),
-        nn.MaxPool2d(3, 2),
+        nn.MaxPool2d(3, 2),    # First downsampling: 224 -> 111
 
         DSConv(16, 32),
         ResidualDSBlock(32),
-        nn.MaxPool2d(3, 2),
+        nn.MaxPool2d(3, 2),    # Second downsampling: 111 -> 55
 
         DSConv(32, 64),
         ResidualDSBlock(64),
         SEBlock(64),
-        nn.MaxPool2d(3, 2)
+        nn.MaxPool2d(3, 2)     # Third downsampling: 55 -> 27
     )
 
 
@@ -253,9 +254,18 @@ class CrossAttention(nn.Module):
 class DualStreamCWTNet(nn.Module):
     def __init__(self, num_classes, dropout=0.4):
         super().__init__()
-        self.stream_amp = make_stream()
-        self.stream_phase = make_stream()
-        self.cross_attn = CrossAttention(64)
+        # Renamed for clarity
+        self.stream_i = make_stream()
+        self.stream_q = make_stream()
+        
+        # FIX 2: Replaced Cross-Attention with a Merge layer
+        # This 1x1 Conv will merge the concatenated 64+64=128 channels
+        self.merge = nn.Sequential(
+            nn.Conv2d(128, 64, 1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
+        )
+
         self.fuse = nn.Sequential(
             ResidualDSBlock(64),
             SEBlock(64),
@@ -271,11 +281,24 @@ class DualStreamCWTNet(nn.Module):
         )
 
     def forward(self, x):
-        xa = self.stream_amp(x[:, 0:1])
-        xp = self.stream_phase(x[:, 1:2])
-        fused = self.cross_attn(xa, xp)
+        # x[:, 0:1] is the I-scalogram
+        # x[:, 1:2] is the Q-scalogram
+        
+        # 1. Process streams in parallel (This is the "Dual-Stream" part)
+        xi = self.stream_i(x[:, 0:1])  # I-Features
+        xq = self.stream_q(x[:, 1:2])  # Q-Features
+
+        # 2. Fuse by concatenating (This is the "Fusion" part)
+        # We stack them on the channel dimension (dim=1)
+        fused = torch.cat([xi, xq], dim=1)  # Shape: [B, 128, H, W]
+        
+        # 3. Merge the fused features
+        fused = self.merge(fused)           # Shape: [B, 64, H, W]
+        
+        # 4. Classify
         fused = self.fuse(fused)
         return self.classifier(fused)
+
 
 if __name__ == '__main__':
     # Training switch - Set to False to skip training and only evaluate
