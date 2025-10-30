@@ -3,9 +3,9 @@
 RadioML 2018.01A → Continuous Wavelet Scalogram Generator
 ==============================================================
 
-Generates amplitude–phase scalograms from I/Q data using
+Generates 1-channel amplitude scalograms from I/Q data using
 physically consistent wavelet parameters (1.5 MHz sampling).
-Each output file: [224×224×2] NumPy array (amplitude, phase).
+Each output file: [224×224×1] NumPy array (amplitude).
 --------------------------------------------------------------
 Author : Istiaque (2025)
 Updated : Oct 2025
@@ -16,8 +16,6 @@ import os
 import numpy as np
 import pywt
 import cv2
-from sklearn.preprocessing import MinMaxScaler
-import matplotlib.pyplot as plt
 
 # =====================
 # CONFIGURATION
@@ -50,10 +48,10 @@ CLASSES = ['32PSK',
 
 
 BASE_INPUT_DIR = "Dataset"      # Root where /snr_xx/class/*.npy are stored
-BASE_OUTPUT_DIR = "Scalograms"    # Where scalograms will be saved
+BASE_OUTPUT_DIR = "Scalograms"  # Where scalograms will be saved
 SAVE_SAMPLES = True           # Save example images for sanity check
 NUM_SAMPLES = 5               # # of sample images per modulation per SNR
-MAX_SCALOGRAMS = None         # Limit per class (None = all)
+MAX_SCALOGRAMS = 4000            # Limit per class (None = all)
 
 
 # =============================================================
@@ -61,41 +59,38 @@ MAX_SCALOGRAMS = None         # Limit per class (None = all)
 # =============================================================
 
 def compute_cwt(signal, sampling_rate=1.5e6, wavelet='cmor1.5-0.5'):
-    """Compute CWT for a 1D signal using correct physical sampling."""
+    """
+    Compute CWT for a 1D (real or complex) signal.
+    Returns the complex coefficients.
+    """
     sampling_period = 1 / sampling_rate
     scales = np.logspace(-1, 1.3, num=200)  # tuned for radio bands
+    
+    # Return the raw complex coefficients
     coeffs, freqs = pywt.cwt(signal, scales, wavelet, sampling_period=sampling_period)
-    coeffs = np.abs(coeffs)
+    
     return coeffs
 
 
-def normalize_stack(cwt_amp, cwt_phase):
-    """Normalize amplitude and phase jointly (0–1 range)."""
-    stacked = np.stack([cwt_amp, cwt_phase], axis=0)
-    stacked = (stacked - stacked.min()) / (stacked.max() - stacked.min() + 1e-8)
-    return stacked
-
-
-def save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr):
-    """Save grayscale amplitude & phase sample images."""
+def save_sample_image(cwt_amp_resized, sample_dir, base_filename, snr):
+    """Save a single grayscale amplitude sample image."""
     amp_path = os.path.join(sample_dir, f"{base_filename}_amp_snr{snr}.png")
-    phase_path = os.path.join(sample_dir, f"{base_filename}_phase_snr{snr}.png")
 
-    # Scale to 0–255 for saving as grayscale PNG
-    amp_img = (255 * (cwt_amp - cwt_amp.min()) / (cwt_amp.max() - cwt_amp.min() + 1e-8)).astype(np.uint8)
-    phase_img = (255 * (cwt_phase - cwt_phase.min()) / (cwt_phase.max() - cwt_phase.min() + 1e-8)).astype(np.uint8)
+    # Scale the 224x224 input to 0–255 for saving as grayscale PNG
+    amp_min = cwt_amp_resized.min()
+    amp_max = cwt_amp_resized.max()
+    amp_img = (255 * (cwt_amp_resized - amp_min) / (amp_max - amp_min + 1e-8)).astype(np.uint8)
 
     cv2.imwrite(amp_path, amp_img)
-    cv2.imwrite(phase_path, phase_img)
 
 # =============================================================
 #   MAIN GENERATION FUNCTION
 # =============================================================
 
 def generate_wavelet_scalograms(data_type, snr,
-                                max_scalograms=None,
-                                save_samples=False,
-                                num_samples=5):
+                                 max_scalograms=None,
+                                 save_samples=False,
+                                 num_samples=5):
     input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", data_type)
     output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", data_type)
     sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", data_type)
@@ -117,30 +112,37 @@ def generate_wavelet_scalograms(data_type, snr,
 
         # Separate I and Q components
         I, Q = data[:, 0], data[:, 1]
-        amplitude = np.sqrt(I**2 + Q**2)
-        phase = np.arctan2(Q, I)
+        
+        # 1. Create the complex signal
+        complex_signal = I + 1j * Q
 
-        # Compute CWTs
-        cwt_amp = compute_cwt(amplitude)
-        cwt_phase = compute_cwt(phase)
+        # 2. Compute CWT on the complex signal (returns complex coeffs)
+        complex_coeffs = compute_cwt(complex_signal)
 
-        # Resize for CNN input
-        cwt_amp = cv2.resize(cwt_amp, (224, 224), interpolation=cv2.INTER_LANCZOS4)
-        cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
+        # 3. Extract amplitude scalogram (discarding phase)
+        cwt_amp = np.abs(complex_coeffs)
 
-        # Normalize jointly
-        stacked = normalize_stack(cwt_amp, cwt_phase)
-        stacked = np.transpose(stacked, (1, 2, 0))  # H×W×C
+        # 4. Resize for CNN input
+        cwt_amp_resized = cv2.resize(cwt_amp, (224, 224), interpolation=cv2.INTER_LANCZOS4)
+
+        # 5. Normalize amplitude (Min-Max to 0-1)
+        amp_min = cwt_amp_resized.min()
+        amp_max = cwt_amp_resized.max()
+        cwt_amp_norm = (cwt_amp_resized - amp_min) / (amp_max - amp_min + 1e-8)
+
+        # 6. Reshape to HxWx1
+        final_scalogram = np.expand_dims(cwt_amp_norm, axis=-1)
 
         # Save scalogram
         base_filename = os.path.splitext(filename)[0]
         output_path = os.path.join(output_dir, f"{base_filename}_snr{snr}.npy")
-        np.save(output_path, stacked.astype(np.float32))
+        np.save(output_path, final_scalogram.astype(np.float32))
         scalogram_count += 1
 
         # Save sample visualization
         if save_samples and sample_count < num_samples:
-            save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr)
+            # Pass the resized (224x224) amplitude data
+            save_sample_image(cwt_amp_resized, sample_dir, base_filename, snr)
             sample_count += 1
 
     print(f"[✓] {data_type} | SNR {snr} → {scalogram_count} scalograms generated.")
