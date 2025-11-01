@@ -34,10 +34,10 @@ CLASSES = [
 ]
 
 BASE_INPUT_DIR = "Dataset"       # Root where /snr_xx/class/*.npy are stored
-BASE_OUTPUT_DIR = "Scalograms"   # Where scalograms will be saved
+BASE_OUTPUT_DIR = "Spectrograms"   # Where scalograms will be saved
 SAVE_SAMPLES = True              # Save example images for sanity check
 NUM_SAMPLES = 5                  # # of sample images per modulation per SNR
-MAX_SCALOGRAMS = 1000            # Limit per class (None = all)
+MAX_SCALOGRAMS = 10            # Limit per class (None = all)
 
 
 # =============================================================
