@@ -35,7 +35,7 @@ BASE_INPUT_DIR = "Dataset"       # Root where /snr_xx/class/*.npy are stored
 BASE_OUTPUT_DIR = "Scalograms"   # Where scalograms will be saved
 SAVE_SAMPLES = True              # Save example images for sanity check
 NUM_SAMPLES = 5                  # # of sample images per modulation per SNR
-MAX_SCALOGRAMS = 4000            # Limit per class (None = all)
+MAX_SCALOGRAMS = 5            # Limit per class (None = all)
 
 
 # =============================================================
@@ -52,10 +52,9 @@ def compute_cwt(signal, sampling_rate=1.5e6, wavelet='cmor1.5-0.5'):
 
 
 def normalize_stack(cwt_amp, cwt_phase):
-    """Normalize amplitude and phase jointly (0–1 range)."""
-    stacked = np.stack([cwt_amp, cwt_phase], axis=0)
-    stacked = (stacked - stacked.min()) / (stacked.max() - stacked.min() + 1e-8)
-    return stacked
+    cwt_amp = (cwt_amp - cwt_amp.min()) / (cwt_amp.max() - cwt_amp.min() + 1e-8)
+    cwt_phase = (cwt_phase - cwt_phase.min()) / (cwt_phase.max() - cwt_phase.min() + 1e-8)
+    return np.stack([cwt_amp, cwt_phase], axis=0)
 
 
 def save_sample_images(cwt_amp, cwt_phase, sample_dir, base_filename, snr):
@@ -101,6 +100,7 @@ def generate_wavelet_scalograms(data_type, snr,
         I, Q = data[:, 0], data[:, 1]
         amplitude = np.sqrt(I**2 + Q**2)
         phase = np.arctan2(Q, I)
+        phase = np.unwrap(phase)
 
         # Compute CWTs
         cwt_amp = compute_cwt(amplitude)
