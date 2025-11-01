@@ -282,7 +282,7 @@ if __name__ == '__main__':
     # ==========================================================
     # CHANGED: Point to new single-channel dataset directory
     # ==========================================================
-    data_dir = f'Scalograms_AmpOnly/snr_{SNR}'
+    data_dir = f'Scalograms/snr_{SNR}'
     
     # Split ratios
     train_ratio = 0.8
