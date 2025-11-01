@@ -65,9 +65,18 @@ class TripleStreamDataset(Dataset):
             
             for file in scalogram_files:
                 scalogram_path = os.path.join(scalogram_class_dir, file)
-                iq_path = os.path.join(iq_class_dir, file)
                 
-                # Only add if both files exist
+                # Convert scalogram filename to IQ filename
+                # e.g., "frame_0_snr30.npy" -> "frame_0.npy"
+                # Extract the frame number from the scalogram filename
+                if '_snr' in file:
+                    iq_filename = file.split('_snr')[0] + '.npy'
+                else:
+                    iq_filename = file
+                
+                iq_path = os.path.join(iq_class_dir, iq_filename)
+                
+                # Only add if IQ file exists
                 if os.path.exists(iq_path):
                     self.all_data.append((scalogram_path, iq_path, label))
         
@@ -93,7 +102,11 @@ class TripleStreamDataset(Dataset):
         phase = phase.transpose(2, 0, 1)          # (1, H, W)
         
         # Load raw IQ data (1024, 2)
-        iq_data = np.load(iq_path)  # Shape: (1024, 2)
+        # Handle case where IQ file might not exist - use zeros as fallback
+        if os.path.exists(iq_path):
+            iq_data = np.load(iq_path)  # Shape: (1024, 2)
+        else:
+            iq_data = np.zeros((1024, 2), dtype=np.float32)
         iq_data = iq_data.T  # Shape: (2, 1024) - transpose to (channels, sequence)
         
         # Convert to tensors
