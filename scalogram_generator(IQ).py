@@ -20,7 +20,7 @@ import cv2
 # CONFIGURATION
 # =====================
 SNR_LEVELS = [30]           # List of SNRs to process
-CLASSES = ["64QAM", "256Qam", "QPSK", "8PSK"] # Add your classes here
+CLASSES = ["64QAM","16QAM"] # Add your classes here
 
 BASE_INPUT_DIR = "Dataset"       # Root folder containing /snr_xx/class/*.npy
 BASE_OUTPUT_DIR = "Scalograms_IQ" # Output folder
