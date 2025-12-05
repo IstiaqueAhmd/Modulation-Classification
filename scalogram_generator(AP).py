@@ -20,13 +20,22 @@ import cv2
 # CONFIGURATION
 # =====================
 SNR_LEVELS = [30]           # List of SNRs to process
-CLASSES = ["64QAM","16QAM"] 
+CLASSES = [
+  "OOK", "4ASK", "8ASK",
+  "BPSK", "QPSK", "8PSK",
+  "16PSK", "32PSK", "16APSK",
+  "32APSK", "64APSK", "128APSK",
+  "16QAM", "32QAM", "64QAM",
+  "128QAM", "256QAM", "AM-SSB-WC",
+  "AM-SSB-SC", "AM-DSB-WC", "AM-DSB-SC",
+  "FM", "GMSK", "OQPSK"
+]
 
 BASE_INPUT_DIR = "Dataset"       # Root folder containing /snr_xx/class/*.npy
 BASE_OUTPUT_DIR = "Scalograms_AmpPhase" # Output folder
 SAVE_SAMPLES = True              # Save .png images for visual debugging
 NUM_SAMPLES = 5                  # Number of debug images to save per class
-MAX_SCALOGRAMS = None            # Set to Integer to limit generation
+MAX_SCALOGRAMS = 1000            # Set to Integer to limit generation
 
 
 # =============================================================
@@ -36,7 +45,7 @@ MAX_SCALOGRAMS = None            # Set to Integer to limit generation
 def compute_cwt(signal, sampling_rate=1e6, wavelet='cmor1.5-0.5'):
     """Compute CWT for a 1D signal."""
     sampling_period = 1 / sampling_rate
-    scales = np.logspace(-0.5, 1.3, num=200) 
+    scales = np.logspace(0.2, 1.5, num=224) 
     coeffs, _ = pywt.cwt(signal, scales, wavelet, sampling_period=sampling_period)
     return np.abs(coeffs)
 
