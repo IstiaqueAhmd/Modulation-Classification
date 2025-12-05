@@ -36,7 +36,7 @@ MAX_SCALOGRAMS = None            # Set to Integer to limit generation
 def compute_cwt(signal, sampling_rate=1e6, wavelet='cmor1.5-0.5'):
     """Compute CWT for a 1D signal."""
     sampling_period = 1 / sampling_rate
-    scales = np.logspace(-0.5, 1.3, num=200) 
+    scales = np.logspace(0.2, 1.5, num=224) 
     coeffs, _ = pywt.cwt(signal, scales, wavelet, sampling_period=sampling_period)
     return np.abs(coeffs)
 
