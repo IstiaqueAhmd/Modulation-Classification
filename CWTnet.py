@@ -248,20 +248,37 @@ class CrossAttention(nn.Module):
 
 
 # ------------------------
-# Dual-Stream CWTNet
+# Dual-Stream CWTNet (Bi-Directional Attention)
 # ------------------------
 class DualStreamCWTNet(nn.Module):
     def __init__(self, num_classes, dropout=0.4):
         super().__init__()
+        # 1. Independent Feature Extraction Streams
         self.stream_amp = make_stream()
         self.stream_phase = make_stream()
-        self.cross_attn = CrossAttention(64)
+        
+        # 2. Bi-Directional Cross Attention
+        # Path A: Amplitude queries Phase (A -> P)
+        self.attn_amp_query = CrossAttention(64)
+        # Path B: Phase queries Amplitude (P -> A)
+        self.attn_phase_query = CrossAttention(64)
+        
+        # 3. Fusion Block
+        # Input channels = 64 (from Path A) + 64 (from Path B) = 128
         self.fuse = nn.Sequential(
+            # First reduce channels back to 64 or keep high capacity? 
+            # Let's use a 1x1 conv to mix the concatenated features first
+            nn.Conv2d(128, 64, kernel_size=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            
             ResidualDSBlock(64),
             SEBlock(64),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten()
         )
+        
+        # 4. Classifier
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(64, 128),
@@ -271,19 +288,40 @@ class DualStreamCWTNet(nn.Module):
         )
 
     def forward(self, x):
-        xa = self.stream_amp(x[:, 0:1])
-        xp = self.stream_phase(x[:, 1:2])
-        fused = self.cross_attn(xa, xp)
-        fused = self.fuse(fused)
+        # Split input into Amplitude (channel 0) and Phase (channel 1)
+        # Shape: [Batch, 1, 224, 224]
+        xa_input = x[:, 0:1]
+        xp_input = x[:, 1:2]
+
+        # Extract Features independenty
+        # Shape: [Batch, 64, H, W]
+        xa = self.stream_amp(xa_input)
+        xp = self.stream_phase(xp_input)
+
+        # Apply Bi-Directional Cross Attention
+        # 1. Amplitude attends to Phase (Original)
+        # "What parts of Phase are relevant to this Amplitude feature?"
+        feat_a = self.attn_amp_query(xa, xp)
+        
+        # 2. Phase attends to Amplitude (New)
+        # "What parts of Amplitude are relevant to this Phase feature?"
+        feat_p = self.attn_phase_query(xp, xa)
+
+        # Concatenate results along channel dimension
+        # Shape: [Batch, 128, H, W]
+        combined = torch.cat([feat_a, feat_p], dim=1)
+
+        # Fuse and Classify
+        fused = self.fuse(combined)
         return self.classifier(fused)
 
 if __name__ == '__main__':
     # Training switch - Set to False to skip training and only evaluate
     TRAIN = True
-    SNR = "20"
+    SNR = "30"
     
     # Dataset setup - Load directly from Scalograms folder
-    data_dir = f'Scalograms/snr_{SNR}'
+    data_dir = f'Scalograms_AmpPhase/snr_{SNR}'
     
     # Split ratios
     train_ratio = 0.8
@@ -409,7 +447,7 @@ if __name__ == '__main__':
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 patience_counter = 0
-                torch.save(model.state_dict(), f"weights_snr{SNR}.pth")
+                torch.save(model.state_dict(), f"weights.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -449,7 +487,7 @@ if __name__ == '__main__':
         print("Training skipped. Loading existing model...")
 
     # Final evaluation
-    model.load_state_dict(torch.load(f"weights_snr{SNR}.pth"))
+    model.load_state_dict(torch.load(f"weights.pth"))
     model.eval()
 
     all_preds = []
