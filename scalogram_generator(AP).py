@@ -21,21 +21,15 @@ import cv2
 # =====================
 SNR_LEVELS = [30]           # List of SNRs to process
 CLASSES = [
-  "OOK", "4ASK", "8ASK",
-  "BPSK", "QPSK", "8PSK",
-  "16PSK", "32PSK", "16APSK",
-  "32APSK", "64APSK", "128APSK",
-  "16QAM", "32QAM", "64QAM",
-  "128QAM", "256QAM", "AM-SSB-WC",
-  "AM-SSB-SC", "AM-DSB-WC", "AM-DSB-SC",
-  "FM", "GMSK", "OQPSK"
+  "OOK", "4ASK","BPSK", "QPSK", "8PSK","8ASK", "16APSK", "64QAM",
+  "AM-SSB-WC", "AM-DSB-WC","FM","GMSK", "OQPSK"
 ]
 
 BASE_INPUT_DIR = "Dataset"       # Root folder containing /snr_xx/class/*.npy
-BASE_OUTPUT_DIR = "Scalograms_AmpPhase" # Output folder
+BASE_OUTPUT_DIR = "Scalograms"   # Output folder
 SAVE_SAMPLES = True              # Save .png images for visual debugging
 NUM_SAMPLES = 5                  # Number of debug images to save per class
-MAX_SCALOGRAMS = 1000            # Set to Integer to limit generation
+MAX_SCALOGRAMS = None              # Set to Integer to limit generation
 
 
 # =============================================================
@@ -87,7 +81,7 @@ def generate_ampphase_scalograms(snr_list):
             # Setup Paths
             input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", mod_class)
             output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", mod_class)
-            sample_dir = os.path.join("ScalogramSamples_AmpPhase", f"snr_{snr}", mod_class)
+            sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", mod_class)
             
             if not os.path.exists(input_dir):
                 print(f"[!] Input directory not found: {input_dir}")
