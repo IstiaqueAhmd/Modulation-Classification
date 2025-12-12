@@ -209,10 +209,10 @@ if __name__ == "__main__":
     # Configuration - adjust as needed
     TRAIN = True
     SNR = "30"
-    BATCH_SIZE = 64
+    BATCH_SIZE = 128
     EPOCHS = 50
     DATA_DIR = f"Scalograms/snr_{SNR}"
-    NUM_WORKERS = 2
+    NUM_WORKERS = 4
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
 
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     # Optimizer with smaller weight decay
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
     # Use ReduceLROnPlateau for more conservative LR changes
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True, min_lr=1e-6)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6)
     criterion = nn.CrossEntropyLoss()
 
     # 6) Training loop with early stopping
