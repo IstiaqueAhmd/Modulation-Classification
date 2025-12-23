@@ -19,17 +19,17 @@ import cv2
 # =====================
 # CONFIGURATION
 # =====================
-SNR_LEVELS = [30]           # List of SNRs to process
+SNR_LEVELS = [-20, -18, -16, -14, -12, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]          # List of SNRs to process
 CLASSES = [
   "OOK", "4ASK","BPSK", "QPSK", "8PSK","8ASK", "16APSK", "64QAM",
   "AM-SSB-WC", "AM-DSB-WC","FM","GMSK", "OQPSK"
 ]
 
 BASE_INPUT_DIR = "Dataset"       # Root folder containing /snr_xx/class/*.npy
-BASE_OUTPUT_DIR = "Scalograms"   # Output folder
+BASE_OUTPUT_DIR = "Dataset/Scalograms"   # Output folder
 SAVE_SAMPLES = True              # Save .png images for visual debugging
 NUM_SAMPLES = 5                  # Number of debug images to save per class
-MAX_SCALOGRAMS = None              # Set to Integer to limit generation
+MAX_SCALOGRAMS = 200            # Set to Integer to limit generation
 
 
 # =============================================================
@@ -81,7 +81,7 @@ def generate_ampphase_scalograms(snr_list):
             # Setup Paths
             input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", mod_class)
             output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", mod_class)
-            sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", mod_class)
+            sample_dir = os.path.join("Dataset/Samples", f"snr_{snr}", mod_class)
             
             if not os.path.exists(input_dir):
                 print(f"[!] Input directory not found: {input_dir}")
@@ -109,17 +109,11 @@ def generate_ampphase_scalograms(snr_list):
                     print(f"   [!] Error loading {fname}: {e}")
                     continue
 
-                # 2. Extract I and Q
-                I = data[:, 0]
-                Q = data[:, 1]
-                
-                # 3. Convert to Amplitude and Phase
-                # Amplitude = sqrt(I^2 + Q^2)
-                amp_sig = np.sqrt(I**2 + Q**2)
-                
-                # Phase = arctan2(Q, I)
-                # We use unwrap to avoid sharp discontinuities at +/- pi
-                phase_sig = np.unwrap(np.arctan2(Q, I))
+                # 2. Extract Amplitude and Phase (already computed in data_extractor)
+                # Column 0: Amplitude = sqrt(I^2 + Q^2)
+                # Column 1: Phase = arctan2(Q, I) in radians
+                amp_sig = data[:, 0]
+                phase_sig = np.unwrap(data[:, 1])  # Unwrap to avoid discontinuities
 
                 # 4. Compute CWTs
                 cwt_amp = compute_cwt(amp_sig)
