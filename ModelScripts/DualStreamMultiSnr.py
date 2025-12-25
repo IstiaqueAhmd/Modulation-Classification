@@ -512,10 +512,10 @@ if __name__ == "__main__":
     print("\nClassification Report:")
     print(classification_report(all_labels, all_preds, target_names=test_dataset.classes, digits=4))
     
-    # Confusion matrix
-    cm = confusion_matrix(all_labels, all_preds)
+    # Confusion matrix (normalized)
+    cm = confusion_matrix(all_labels, all_preds, normalize='true')
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+    sns.heatmap(cm, annot=True, fmt='.2f', cmap='Blues',
                 xticklabels=test_dataset.classes, yticklabels=test_dataset.classes)
     plt.title(f'Confusion Matrix - Test SNR {TEST_SNR}')
     plt.xlabel('Predicted')
