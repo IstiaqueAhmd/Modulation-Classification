@@ -38,66 +38,7 @@ def set_seed(seed=42):
 set_seed(42)
 
 # -------------------------
-# 2) Balanced SNR Batch Sampler
-# -------------------------
-class BalancedSNRBatchSampler:
-    """
-    Custom batch sampler that ensures each batch contains equal samples from each SNR.
-    This helps the model learn robustly across all noise conditions.
-    """
-    def __init__(self, snr_indices_dict, batch_size, drop_last=True):
-        """
-        Args:
-            snr_indices_dict: Dict mapping SNR name to list of indices for that SNR
-            batch_size: Total batch size (must be divisible by number of SNRs)
-            drop_last: Whether to drop incomplete batches
-        """
-        self.snr_names = sorted(snr_indices_dict.keys())
-        self.snr_indices = {snr: list(indices) for snr, indices in snr_indices_dict.items()}
-        self.batch_size = batch_size
-        self.drop_last = drop_last
-        self.num_snrs = len(self.snr_names)
-        
-        if batch_size % self.num_snrs != 0:
-            raise ValueError(f"Batch size ({batch_size}) must be divisible by number of SNRs ({self.num_snrs})")
-        
-        self.samples_per_snr = batch_size // self.num_snrs
-        
-        # Calculate number of batches
-        min_samples = min(len(indices) for indices in self.snr_indices.values())
-        self.num_batches = min_samples // self.samples_per_snr
-        if not drop_last and min_samples % self.samples_per_snr != 0:
-            self.num_batches += 1
-    
-    def __iter__(self):
-        # Shuffle indices for each SNR independently
-        shuffled_snr_indices = {}
-        for snr in self.snr_names:
-            indices = self.snr_indices[snr].copy()
-            random.shuffle(indices)
-            shuffled_snr_indices[snr] = indices
-        
-        # Generate batches
-        for batch_idx in range(self.num_batches):
-            batch = []
-            start_idx = batch_idx * self.samples_per_snr
-            end_idx = start_idx + self.samples_per_snr
-            
-            # Sample equally from each SNR
-            for snr in self.snr_names:
-                snr_batch = shuffled_snr_indices[snr][start_idx:end_idx]
-                if len(snr_batch) < self.samples_per_snr and self.drop_last:
-                    continue
-                batch.extend(snr_batch)
-            
-            if len(batch) == self.batch_size or (not self.drop_last and len(batch) > 0):
-                yield batch
-    
-    def __len__(self):
-        return self.num_batches
-
-# -------------------------
-# 3) Dataset
+# 2) Dataset
 # -------------------------
 class ScalogramDataset(Dataset):
     """
@@ -211,43 +152,104 @@ def compute_dataset_stats(dataset, batch_size=64, num_workers=2):
 # -------------------------
 # 4) Model architecture (clean BN defaults)
 # -------------------------
+# -------------------------
+# Depthwise-Separable Conv
+# -------------------------
 class DSConv(nn.Module):
     def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_ch, in_ch, k, s, p, groups=in_ch, bias=False),
-            nn.BatchNorm2d(in_ch),   # default momentum
+            nn.BatchNorm2d(in_ch),
             nn.ReLU(inplace=True),
             nn.Conv2d(in_ch, out_ch, 1, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.ReLU(inplace=True)
         )
-    def forward(self, x): return self.block(x)
 
+    def forward(self, x):
+        return self.block(x)
+
+
+# -------------------------
+# Stream Backbone
+# -------------------------
 def make_stream():
     return nn.Sequential(
         nn.Conv2d(1, 16, kernel_size=7, stride=2, padding=3, bias=False),
         nn.BatchNorm2d(16),
         nn.ReLU(inplace=True),
         nn.MaxPool2d(3, 2),
+
         DSConv(16, 32),
         nn.MaxPool2d(3, 2),
+
         DSConv(32, 64),
         DSConv(64, 64),
         DSConv(64, 32),
-        nn.MaxPool2d(3, 2)
+
+        nn.MaxPool2d(3, 2)   # Output: [B, 32, h, w]
     )
 
+
+# -------------------------
+# Cross-Stream Attention
+# -------------------------
+class CrossStreamAttention(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        self.fc_amp_to_phase = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+        self.fc_phase_to_amp = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, xa, xp):
+        # xa, xp: [B, C, H, W]
+        b, c, _, _ = xa.size()
+
+        ga = self.pool(xa).view(b, c)
+        gp = self.pool(xp).view(b, c)
+
+        wa = self.fc_phase_to_amp(gp).view(b, c, 1, 1)
+        wp = self.fc_amp_to_phase(ga).view(b, c, 1, 1)
+
+        xa = xa * wa
+        xp = xp * wp
+
+        return xa, xp
+
+
+# -------------------------
+# Dual-Stream CNN (Final)
+# -------------------------
 class DualStreamCNN(nn.Module):
     def __init__(self, num_classes, dropout=0.3):
         super().__init__()
+
         self.stream_amp = make_stream()
         self.stream_phase = make_stream()
+
+        # Cross-stream attention (32 channels per stream)
+        self.cross_attention = CrossStreamAttention(channels=32, reduction=16)
+
+        # Fusion + refinement
         self.fuse = nn.Sequential(
             DSConv(64, 64),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten()
         )
+
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(64, num_classes)
@@ -255,11 +257,17 @@ class DualStreamCNN(nn.Module):
 
     def forward(self, x):
         # x: [B, 2, H, W]
-        xa = self.stream_amp(x[:, 0:1])  # [B, 32, h, w]
-        xp = self.stream_phase(x[:, 1:2])
-        x = torch.cat([xa, xp], dim=1)   # [B, 64, h, w]
-        x = self.fuse(x)                 # [B, 64]
-        return self.classifier(x)
+        xa = self.stream_amp(x[:, 0:1])    # Amplitude stream
+        xp = self.stream_phase(x[:, 1:2])  # Phase stream
+
+        # Cross-stream attention
+        xa, xp = self.cross_attention(xa, xp)
+
+        # Feature fusion
+        x = torch.cat([xa, xp], dim=1)     # [B, 64, h, w]
+        x = self.fuse(x)                   # [B, 64]
+
+        return self.classifier(x)           # logits
 
 # -------------------------
 # 5) Training / evaluation loop (main)
@@ -267,82 +275,23 @@ class DualStreamCNN(nn.Module):
 if __name__ == "__main__":
     # Configuration - adjust as needed
     TRAIN = True
-    TEST_SNR = "10"  # SNR to use for testing (will be excluded from training)
-    BATCH_SIZE = 126  # Must be divisible by number of SNRs (6 SNRs -> 21 samples per SNR)
+    SNR = "0"
+    BATCH_SIZE = 128
     EPOCHS = 50
-    BASE_DIR = "Dataset/Scalograms"
+    DATA_DIR = f"Dataset/Scalograms/snr_{SNR}"
     NUM_WORKERS = 4
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
 
-    # 1) Determine which SNR folders to use
-    # Get all SNR folders - train on ALL SNRs
-    all_snr_folders = sorted([d for d in os.listdir(BASE_DIR) 
-                              if os.path.isdir(os.path.join(BASE_DIR, d)) and d.startswith('snr_')])
-    
-    if not all_snr_folders:
-        raise ValueError(f"No SNR folders found in {BASE_DIR}")
-    
-    # Train on ALL SNRs (including test SNR)
-    train_val_snr_folders = all_snr_folders
-    train_val_dirs = [os.path.join(BASE_DIR, snr_folder) for snr_folder in train_val_snr_folders]
-    
-    # Test on specified SNR
-    test_snr_folder = f"snr_{TEST_SNR}"
-    test_dir = os.path.join(BASE_DIR, test_snr_folder)
-    model_suffix = f"all_snrs_test{TEST_SNR}"
-    
-    print(f"Training on ALL SNRs: {train_val_snr_folders}")
-    print(f"Testing on SNR: {TEST_SNR}")
-
-    # 2) Create splits and track SNR-specific indices
+    # 1) Create splits
     print("Creating randomized train/val/test splits ...")
-    
-    # For training/validation: combine all specified directories
-    all_train_indices = []
-    all_val_indices = []
-    train_snr_indices = {}  # Maps SNR name to train indices for balanced sampling
-    val_snr_indices = {}    # Maps SNR name to val indices
-    global_offset = 0
-    
-    for snr_folder, data_dir in zip(train_val_snr_folders, train_val_dirs):
-        train_idx, val_idx, _ = create_randomized_split(data_dir, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
-        
-        # Offset indices to account for multiple directories
-        offset_train_idx = [idx + global_offset for idx in train_idx]
-        offset_val_idx = [idx + global_offset for idx in val_idx]
-        
-        all_train_indices.extend(offset_train_idx)
-        all_val_indices.extend(offset_val_idx)
-        
-        # Store SNR-specific indices for balanced sampling
-        train_snr_indices[snr_folder] = offset_train_idx
-        val_snr_indices[snr_folder] = offset_val_idx
-        
-        # Update offset for next directory
-        temp_dataset = ScalogramDataset(data_dir, transform=None, indices=None)
-        global_offset += len(temp_dataset.all_data)
-    
-    # For testing: use only the specified test SNR
-    _, _, test_indices = create_randomized_split(test_dir, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+    train_indices, val_indices, test_indices = create_randomized_split(DATA_DIR, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
 
-    # 3) Create combined dataset for training/validation
-    # Combine datasets from all SNR folders
-    combined_train_val_dataset = ScalogramDataset(train_val_dirs[0], transform=None, indices=None)
-    for data_dir in train_val_dirs[1:]:
-        temp_ds = ScalogramDataset(data_dir, transform=None, indices=None)
-        combined_train_val_dataset.all_data.extend(temp_ds.all_data)
-    combined_train_val_dataset.data = combined_train_val_dataset.all_data
-    
-    # Create training subset for normalization
-    temp_dataset = ScalogramDataset(train_val_dirs[0], transform=None, indices=None)
-    temp_dataset.all_data = combined_train_val_dataset.all_data
-    temp_dataset.data = [combined_train_val_dataset.all_data[i] for i in all_train_indices]
-    
-    # 4) Compute normalization stats using training subset
+    # 2) Compute normalization stats using training subset
+    temp_dataset = ScalogramDataset(DATA_DIR, transform=None, indices=train_indices)
     norm_mean, norm_std = compute_dataset_stats(temp_dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
 
-    # 5) Define transforms (augmentations BEFORE Normalize)
+    # 3) Define transforms (augmentations BEFORE Normalize)
     train_transform = transforms.Compose([
         # mild spatial jitter
         transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3))], p=0.2),
@@ -355,37 +304,19 @@ if __name__ == "__main__":
         transforms.Normalize(norm_mean, norm_std)
     ])
 
-    # 6) Datasets and loaders
-    # Combined dataset for training/validation
-    train_dataset = ScalogramDataset(train_val_dirs[0], transform=train_transform, indices=None)
-    train_dataset.all_data = combined_train_val_dataset.all_data
-    train_dataset.data = [combined_train_val_dataset.all_data[i] for i in all_train_indices]
-    
-    val_dataset = ScalogramDataset(train_val_dirs[0], transform=val_test_transform, indices=None)
-    val_dataset.all_data = combined_train_val_dataset.all_data
-    val_dataset.data = [combined_train_val_dataset.all_data[i] for i in all_val_indices]
-    
-    # Test dataset uses the specified TEST_SNR
-    test_dataset = ScalogramDataset(test_dir, transform=val_test_transform, indices=test_indices)
+    # 4) Datasets and loaders
+    train_dataset = ScalogramDataset(DATA_DIR, transform=train_transform, indices=train_indices)
+    val_dataset = ScalogramDataset(DATA_DIR, transform=val_test_transform, indices=val_indices)
+    test_dataset = ScalogramDataset(DATA_DIR, transform=val_test_transform, indices=test_indices)
 
-    # Create balanced batch sampler for training
-    train_batch_sampler = BalancedSNRBatchSampler(
-        snr_indices_dict=train_snr_indices,
-        batch_size=BATCH_SIZE,
-        drop_last=True
-    )
-    
-    print(f"Using balanced batch sampler: {BATCH_SIZE // len(train_snr_indices)} samples per SNR per batch")
-    
-    # DataLoaders - use batch_sampler for training to ensure balanced SNR representation
-    train_loader = DataLoader(train_dataset, batch_sampler=train_batch_sampler,
-                              num_workers=NUM_WORKERS, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
                             num_workers=NUM_WORKERS, pin_memory=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,
                              num_workers=NUM_WORKERS, pin_memory=True)
 
-    # 7) Model, optimizer, scheduler, loss
+    # 5) Model, optimizer, scheduler, loss
     num_classes = len(train_dataset.classes)
     model = DualStreamCNN(num_classes=num_classes).to(DEVICE)
     
@@ -397,7 +328,7 @@ if __name__ == "__main__":
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6)
     criterion = nn.CrossEntropyLoss()
 
-    # 8) Training loop with early stopping
+    # 6) Training loop with early stopping
     if TRAIN:
         best_val_acc = 0.0
         patience = 10
@@ -469,7 +400,7 @@ if __name__ == "__main__":
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
                 counter = 0
-                torch.save(model.state_dict(), f"best_model_{model_suffix}.pth")
+                torch.save(model.state_dict(), f"best_model_snr{SNR}.pth")
                 print(f"New best val acc {best_val_acc:.4f} -> saved model.")
             else:
                 counter += 1
@@ -489,11 +420,11 @@ if __name__ == "__main__":
         plt.plot(history['val_acc'], label='Val')
         plt.title('Accuracy')
         plt.legend()
-        plt.savefig(f'training_curves_{model_suffix}.png')
-        print(f"Saved training_curves_{model_suffix}.png")
+        plt.savefig(f'training_curves_snr{SNR}.png')
+        print("Saved training_curves_snr{SNR}.png")
 
-    # 9) Evaluation (load best model if available)
-    model_path = f"best_model_{model_suffix}.pth"
+    # 7) Evaluation (load best model if available)
+    model_path = f"best_model_snr{SNR}.pth"
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=DEVICE))
         print(f"Loaded best model from {model_path} for evaluation.")
@@ -519,8 +450,8 @@ if __name__ == "__main__":
     plt.figure(figsize=(10, 8))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=train_dataset.classes, yticklabels=train_dataset.classes)
-    plt.title(f'Confusion Matrix (Test SNR: {TEST_SNR})')
+    plt.title(f'Confusion Matrix SNR {SNR}')
     plt.tight_layout()
-    plt.savefig(f'Confusion_Matrix_{model_suffix}_test{TEST_SNR}.png')
-    print(f"Saved Confusion_Matrix_{model_suffix}_test{TEST_SNR}.png")
+    plt.savefig(f'Confusion_Matrix_snr{SNR}.png')
+    print(f"Saved Confusion_Matrix_snr{SNR}.png")
     print("Done.")

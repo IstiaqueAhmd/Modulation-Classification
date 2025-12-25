@@ -32,7 +32,7 @@ CLASSES = [
 ]
 
 BASE_INPUT_DIR = "Dataset"       # Root folder containing /snr_xx/class/*.npy
-BASE_OUTPUT_DIR = "Scalograms"   # Output folder updated
+BASE_OUTPUT_DIR = "Dataset/Scalograms"   # Output folder updated
 SAVE_SAMPLES = True              # Save .png images for visual debugging
 NUM_SAMPLES = 5                  # Number of debug images to save per class
 MAX_SCALOGRAMS = 2000            # Set to Integer to limit generation (e.g., 1000) or None for all
@@ -111,7 +111,7 @@ def generate_dual_scalograms(snr_list):
             # Setup Paths
             input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", mod_class)
             output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", mod_class)
-            sample_dir = os.path.join("ScalogramSamples", f"snr_{snr}", mod_class)
+            sample_dir = os.path.join("Dataset/ScalogramSamples", f"snr_{snr}", mod_class)
             
             if not os.path.exists(input_dir):
                 print(f"[!] Input directory not found: {input_dir}")

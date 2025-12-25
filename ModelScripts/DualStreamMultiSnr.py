@@ -271,18 +271,18 @@ if __name__ == "__main__":
     # =====================
     # CONFIGURATION
     # =====================
-    TRAIN = True                # Set to False to only run evaluation
+    TRAIN = False                # Set to False to only run evaluation
     
     # Training: use multiple SNR levels
-    TRAIN_SNRS = ["-10", "0", "10", "20"]
+    TRAIN_SNRS = [-20, -18, -16, -14, -12, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30]
     
     # Testing: evaluate on specific SNR level
-    TEST_SNR = "30"
+    TEST_SNR = "-10"
     
     SCALOGRAM_BASE_DIR = "Dataset/Scalograms"
     BATCH_SIZE = 128
-    EPOCHS = 50
-    NUM_WORKERS = 4
+    EPOCHS = 100
+    NUM_WORKERS = 2
     
     # Model and stats file paths
     MODEL_PATH = "best_model_multisnr.pth"
@@ -302,15 +302,17 @@ if __name__ == "__main__":
         print("TRAINING MODE")
         print("="*50)
         
-        # Create multi-SNR training and validation datasets (no transform yet for stats)
-        print("\nCreating multi-SNR training dataset...")
-        train_dataset_raw = MultiSnrScalogramDataset(
-            SCALOGRAM_BASE_DIR, TRAIN_SNRS, transform=None, split='train'
-        )
-        
-        # Compute normalization stats from training data
-        norm_mean, norm_std = compute_dataset_stats(train_dataset_raw, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
-        save_normalization_stats(norm_mean, norm_std, STATS_PATH)
+        # Load existing normalization stats or compute from training data
+        if os.path.exists(STATS_PATH):
+            norm_mean, norm_std = load_normalization_stats(STATS_PATH)
+        else:
+            # Create multi-SNR training dataset (no transform) for stats computation
+            print("\nCreating multi-SNR training dataset for stats computation...")
+            train_dataset_raw = MultiSnrScalogramDataset(
+                SCALOGRAM_BASE_DIR, TRAIN_SNRS, transform=None, split='train'
+            )
+            norm_mean, norm_std = compute_dataset_stats(train_dataset_raw, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
+            save_normalization_stats(norm_mean, norm_std, STATS_PATH)
         
         # Define transforms
         train_transform = transforms.Compose([
@@ -341,8 +343,15 @@ if __name__ == "__main__":
         num_classes = len(train_dataset.classes)
         model = DualStreamCNN(num_classes=num_classes).to(DEVICE)
         
+        # Check for existing weights and load if available
+        if os.path.exists(MODEL_PATH):
+            model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+            print(f"\nLoaded existing weights from {MODEL_PATH}")
+        else:
+            print(f"\nNo existing weights found at {MODEL_PATH}, starting with fresh weights.")
+        
         num_params = sum(p.numel() for p in model.parameters())
-        print(f"\nModel initialized with {num_params:,} parameters (DualStreamCNN).")
+        print(f"Model has {num_params:,} parameters (DualStreamCNN).")
         print(f"Number of classes: {num_classes}")
         print(f"Classes: {train_dataset.classes}")
         

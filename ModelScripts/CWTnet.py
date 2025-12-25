@@ -321,7 +321,7 @@ if __name__ == '__main__':
     SNR = "30"
     
     # Dataset setup - Load directly from Scalograms folder
-    data_dir = f'Scalograms/snr_{SNR}'
+    data_dir = f'Dataset/Scalograms/snr_{SNR}'
     
     # Split ratios
     train_ratio = 0.8

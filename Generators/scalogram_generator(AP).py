@@ -43,13 +43,11 @@ def compute_cwt(signal, sampling_rate=1e6, wavelet='cmor1.5-0.5'):
     coeffs, _ = pywt.cwt(signal, scales, wavelet, sampling_period=sampling_period)
     return np.abs(coeffs)
 
-def normalize_stack(cwt_ch1, cwt_ch2):
-    """Normalize channels independently to 0-1 and stack."""
-    def norm(arr):
-        return (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
-    
+def stack_channels(cwt_ch1, cwt_ch2):
+    """Stack channels without normalization. Normalization will be 
+    handled by the training script with proper global statistics."""
     # Stack features: Result shape [2, H, W]
-    return np.stack([norm(cwt_ch1), norm(cwt_ch2)], axis=0)
+    return np.stack([cwt_ch1, cwt_ch2], axis=0)
 
 def save_debug_image(cwt_amp, cwt_phase, save_dir, filename):
     """Save visual comparison of the 2 channels (Grayscale side-by-side)."""
@@ -123,9 +121,9 @@ def generate_ampphase_scalograms(snr_list):
                 cwt_amp = cv2.resize(cwt_amp, (224, 224), interpolation=cv2.INTER_LANCZOS4)
                 cwt_phase = cv2.resize(cwt_phase, (224, 224), interpolation=cv2.INTER_LANCZOS4)
 
-                # 6. Normalize and Stack
+                # 6. Stack Channels (normalization handled by training script)
                 # Returns [2, 224, 224] -> Channel 0 is Amp, Channel 1 is Phase
-                stacked = normalize_stack(cwt_amp, cwt_phase)
+                stacked = stack_channels(cwt_amp, cwt_phase)
                 
                 # Transpose for saving: [224, 224, 2]
                 final_array = np.transpose(stacked, (1, 2, 0))

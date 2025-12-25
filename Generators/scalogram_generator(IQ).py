@@ -23,7 +23,7 @@ SNR_LEVELS = [30]           # List of SNRs to process
 CLASSES = ["64QAM","16QAM"] # Add your classes here
 
 BASE_INPUT_DIR = "Dataset"       # Root folder containing /snr_xx/class/*.npy
-BASE_OUTPUT_DIR = "Scalograms_IQ" # Output folder
+BASE_OUTPUT_DIR = "Dataset/Scalograms" # Output folder
 SAVE_SAMPLES = True              # Save .png images for visual debugging
 NUM_SAMPLES = 5                  # Number of debug images to save per class
 MAX_SCALOGRAMS = None            # Set to Integer to limit generation
@@ -78,7 +78,7 @@ def generate_iq_scalograms(snr_list):
             # Setup Paths
             input_dir = os.path.join(BASE_INPUT_DIR, f"snr_{snr}", mod_class)
             output_dir = os.path.join(BASE_OUTPUT_DIR, f"snr_{snr}", mod_class)
-            sample_dir = os.path.join("ScalogramSamples_IQ", f"snr_{snr}", mod_class)
+            sample_dir = os.path.join("Dataset/ScalogramSamples_IQ", f"snr_{snr}", mod_class)
             
             if not os.path.exists(input_dir):
                 print(f"[!] Input directory not found: {input_dir}")

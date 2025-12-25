@@ -1,50 +1,63 @@
+"""
+Stable training script for dual-stream scalogram CNN.
+Key improvements:
+ - Correct order of transforms (augmentations before normalization)
+ - Robust dataset mean/std computation (sum & sumsq)
+ - Restored BatchNorm defaults (no very-low momentum)
+ - Reduced weight decay and switched to ReduceLROnPlateau scheduler
+ - Added mild augmentations to improve generalization
+"""
+
 import os
 import random
+import math
 import numpy as np
 import torch
-import torchvision
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
-import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, classification_report
+import seaborn as sns
+from tqdm import tqdm
 
-# Set random seeds for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+# -------------------------
+# 1) Reproducibility
+# -------------------------
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # deterministic flags
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
+set_seed(42)
 
+# -------------------------
+# 2) Dataset
+# -------------------------
 class ScalogramDataset(Dataset):
+    """
+    Expects .npy files shaped (H, W, 2) where channels are last axis.
+    __getitem__ returns (tensor: [2, H, W], label:int)
+    """
     def __init__(self, root_dir, transform=None, indices=None):
-        """
-        Dataset that can work with a subset of indices for train/val/test splits
-        
-        Args:
-            root_dir: Path to the scalograms folder
-            transform: Transformations to apply
-            indices: List of indices to use (for splitting). If None, uses all data.
-        """
         self.root_dir = root_dir
         self.transform = transform
-        self.classes = sorted(os.listdir(root_dir))
+        self.classes = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
         self.all_data = []
 
-        # Collect all data files
+        # deterministically gather files per class (sorted)
         for label, class_name in enumerate(self.classes):
             class_dir = os.path.join(root_dir, class_name)
-            if not os.path.isdir(class_dir):
-                continue
-            for file in os.listdir(class_dir):
-                if file.endswith('.npy'):
-                    self.all_data.append((os.path.join(class_dir, file), label))
-        
-        # If indices are provided, use only those
+            files = sorted([f for f in os.listdir(class_dir) if f.endswith('.npy')])
+            for f in files:
+                self.all_data.append((os.path.join(class_dir, f), label))
+
         if indices is not None:
             self.data = [self.all_data[i] for i in indices]
         else:
@@ -55,430 +68,352 @@ class ScalogramDataset(Dataset):
 
     def __getitem__(self, idx):
         file_path, label = self.data[idx]
-        scalogram = np.load(file_path).transpose(2, 0, 1)
-        scalogram = torch.tensor(scalogram, dtype=torch.float32)
-        if self.transform:
-            scalogram = self.transform(scalogram)
-        return scalogram, label
+        try:
+            arr = np.load(file_path)  # expected (H, W, 2)
+            # If array shape varies, try to handle common cases
+            if arr.ndim == 2:
+                # single channel -> duplicate
+                arr = np.stack([arr, arr], axis=-1)
+            elif arr.shape[-1] == 1:
+                arr = np.concatenate([arr, arr], axis=-1)
+            # transpose to (C, H, W)
+            tensor = torch.tensor(arr.transpose(2, 0, 1), dtype=torch.float32)
+            if self.transform:
+                tensor = self.transform(tensor)
+            return tensor, label
+        except Exception as e:
+            print(f"[WARN] Error loading {file_path}: {e}. Returning zeros.")
+            return torch.zeros((2, 224, 224), dtype=torch.float32), label
 
-
-def create_train_val_test_split(root_dir, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
-    """
-    Split dataset into train/val/test indices without copying files
-    
-    Args:
-        root_dir: Path to the scalograms folder
-        train_ratio: Proportion for training set
-        val_ratio: Proportion for validation set
-        test_ratio: Proportion for test set
-        seed: Random seed for reproducibility
-        
-    Returns:
-        train_indices, val_indices, test_indices
-    """
+# -------------------------
+# 3) Utilities: split & stats
+# -------------------------
+def create_randomized_split(root_dir, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1, seed=42):
     random.seed(seed)
-    np.random.seed(seed)
-    
-    classes = sorted(os.listdir(root_dir))
-    all_indices = []
-    
-    # Collect indices per class to ensure balanced splits
-    for label, class_name in enumerate(classes):
-        class_dir = os.path.join(root_dir, class_name)
-        if not os.path.isdir(class_dir):
-            continue
-            
-        class_files = [f for f in os.listdir(class_dir) if f.endswith('.npy')]
-        class_indices = list(range(len(class_files)))
-        random.shuffle(class_indices)
-        
-        # Calculate split points
-        total = len(class_indices)
-        train_count = int(total * train_ratio)
-        val_count = int(total * val_ratio)
-        
-        # Split indices for this class
-        train_idx = class_indices[:train_count]
-        val_idx = class_indices[train_count:train_count + val_count]
-        test_idx = class_indices[train_count + val_count:]
-        
-        all_indices.append({
-            'train': train_idx,
-            'val': val_idx,
-            'test': test_idx,
-            'class': class_name
-        })
-    
-    # Now create global indices
-    temp_dataset = ScalogramDataset(root_dir)
-    global_train_indices = []
-    global_val_indices = []
-    global_test_indices = []
-    
-    # Map local class indices to global dataset indices
+    classes = sorted([d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))])
+    global_train, global_val, global_test = [], [], []
     current_idx = 0
-    for label, class_name in enumerate(classes):
+
+    for class_name in classes:
         class_dir = os.path.join(root_dir, class_name)
-        if not os.path.isdir(class_dir):
+        files = sorted([f for f in os.listdir(class_dir) if f.endswith('.npy')])
+        n = len(files)
+        if n == 0:
+            current_idx += 0
             continue
-            
-        class_files = [f for f in os.listdir(class_dir) if f.endswith('.npy')]
-        num_files = len(class_files)
-        
-        # Get the split for this class
-        class_split = next(item for item in all_indices if item['class'] == class_name)
-        
-        # Convert local indices to global
-        for local_idx in class_split['train']:
-            global_train_indices.append(current_idx + local_idx)
-        for local_idx in class_split['val']:
-            global_val_indices.append(current_idx + local_idx)
-        for local_idx in class_split['test']:
-            global_test_indices.append(current_idx + local_idx)
-        
-        current_idx += num_files
-    
-    return global_train_indices, global_val_indices, global_test_indices
+        indices = list(range(n))
+        random.shuffle(indices)
+        t_end = int(n * train_ratio)
+        v_end = int(n * (train_ratio + val_ratio))
+        # map to global indices
+        global_train.extend([current_idx + i for i in indices[:t_end]])
+        global_val.extend([current_idx + i for i in indices[t_end:v_end]])
+        global_test.extend([current_idx + i for i in indices[v_end:]])
+        current_idx += n
 
+    return global_train, global_val, global_test
 
-def calculate_dataset_stats(dataset):
-    loader = DataLoader(dataset, batch_size=64, num_workers=4)
-    mean = torch.zeros(2)
-    std = torch.zeros(2)
-    for inputs, _ in loader:
-        for i in range(2):
-            mean[i] += inputs[:, i].mean()
-            std[i] += inputs[:, i].std()
-    return (mean / len(loader)).tolist(), (std / len(loader)).tolist()
+def compute_dataset_stats(dataset, batch_size=64, num_workers=2):
+    """
+    Compute per-channel mean and std using sum and sum-of-squares.
+    Expects dataset that returns (tensor [C,H,W], label)
+    Returns (mean_list, std_list)
+    """
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    channel_sum = None
+    channel_sumsq = None
+    total_pixels = 0
 
+    print("Computing dataset mean and std...")
+    for data, _ in tqdm(loader, desc="Stats"):
+        # data shape: [B, C, H, W]
+        b, c, h, w = data.shape
+        pixels = b * h * w
+        if channel_sum is None:
+            channel_sum = data.sum(dim=(0, 2, 3))
+            channel_sumsq = (data * data).sum(dim=(0, 2, 3))
+        else:
+            channel_sum += data.sum(dim=(0, 2, 3))
+            channel_sumsq += (data * data).sum(dim=(0, 2, 3))
+        total_pixels += pixels
 
-# ------------------------
-# Utility: Depthwise Separable Conv
-# ------------------------
-class DSConv(nn.Module):
-    def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
-        super().__init__()
-        self.depthwise = nn.Conv2d(in_ch, in_ch, k, s, p, groups=in_ch, bias=False)
-        self.pointwise = nn.Conv2d(in_ch, out_ch, 1, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
-        self.act = nn.ReLU(inplace=True)
+    mean = channel_sum / total_pixels
+    mean_sq = channel_sumsq / total_pixels
+    var = mean_sq - mean * mean
+    # Numerical safety: clip var >= eps
+    eps = 1e-6
+    std = torch.sqrt(torch.clamp(var, min=eps))
 
-    def forward(self, x):
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        x = self.bn(x)
-        return self.act(x)
+    mean_list = mean.tolist()
+    std_list = std.tolist()
+    print(f"Computed mean: {mean_list}, std: {std_list}")
+    return mean_list, std_list
 
+# -------------------------
+# 4) Model architecture (clean BN defaults)
+# -------------------------
 
-# ------------------------
-# Residual DSConv Block
-# ------------------------
-class ResidualDSBlock(nn.Module):
-    def __init__(self, ch):
-        super().__init__()
-        self.block = nn.Sequential(
-            DSConv(ch, ch),
-            DSConv(ch, ch)
-        )
-
-    def forward(self, x):
-        return x + self.block(x)
-
-
-# ------------------------
-# Squeeze-and-Excitation (SE) Channel Attention
-# ------------------------
 class SEBlock(nn.Module):
-    def __init__(self, ch, reduction=8):
+    def __init__(self, channels, reduction=16):
         super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(ch, ch // reduction, 1),
+            nn.Linear(channels, channels // reduction, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch // reduction, ch, 1),
+            nn.Linear(channels // reduction, channels, bias=False),
             nn.Sigmoid()
         )
 
     def forward(self, x):
-        w = self.fc(x)
-        return x * w
+        # x: [B, C, H, W]
+        b, c, _, _ = x.size()
+        y = self.pool(x).view(b, c)   # [B, C]
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y                  # channel-wise reweighting
 
 
-# ------------------------
-# One Stream (Amplitude or Phase)
-# ------------------------
+
+class DSConv(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3, s=1, p=1):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, in_ch, k, s, p, groups=in_ch, bias=False),
+            nn.BatchNorm2d(in_ch),   # default momentum
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True)
+        )
+    def forward(self, x): return self.block(x)
+
 def make_stream():
     return nn.Sequential(
-        nn.Conv2d(1, 16, 7, 2, 3, bias=False),
+        nn.Conv2d(1, 16, kernel_size=7, stride=2, padding=3, bias=False),
         nn.BatchNorm2d(16),
         nn.ReLU(inplace=True),
         nn.MaxPool2d(3, 2),
-
         DSConv(16, 32),
-        ResidualDSBlock(32),
         nn.MaxPool2d(3, 2),
-
         DSConv(32, 64),
-        ResidualDSBlock(64),
-        SEBlock(64),
+        DSConv(64, 64),
+        DSConv(64, 32),
         nn.MaxPool2d(3, 2)
     )
 
-
-# ------------------------
-# Cross Attention Fusion
-# ------------------------
-class CrossAttention(nn.Module):
-    def __init__(self, ch):
-        super().__init__()
-        self.query = nn.Conv2d(ch, ch // 2, 1)
-        self.key = nn.Conv2d(ch, ch // 2, 1)
-        self.value = nn.Conv2d(ch, ch, 1)
-        self.softmax = nn.Softmax(dim=-1)
-
-    def forward(self, a, p):
-        # flatten spatial dimensions
-        B, C, H, W = a.shape
-        Q = self.query(a).flatten(2)          # [B, C/2, HW]
-        K = self.key(p).flatten(2)            # [B, C/2, HW]
-        V = self.value(p).flatten(2)          # [B, C, HW]
-        attn = self.softmax(torch.bmm(Q.transpose(1, 2), K))  # [B, HW, HW]
-        out = torch.bmm(V, attn.transpose(1, 2)).view(B, C, H, W)
-        return out + a
-
-
-# ------------------------
-# Dual-Stream CWTNet
-# ------------------------
-class DualStreamCWTNet(nn.Module):
-    def __init__(self, num_classes, dropout=0.4):
+class DualStreamCNN(nn.Module):
+    def __init__(self, num_classes, dropout=0.3):
         super().__init__()
         self.stream_amp = make_stream()
         self.stream_phase = make_stream()
-        self.cross_attn = CrossAttention(64)
+
+        self.attention = SEBlock(channels=64, reduction=16)
+
         self.fuse = nn.Sequential(
-            ResidualDSBlock(64),
-            SEBlock(64),
+            DSConv(64, 64),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten()
         )
+
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Linear(64, 128),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout / 2),
-            nn.Linear(128, num_classes)
+            nn.Linear(64, num_classes)
         )
 
     def forward(self, x):
-        xa = self.stream_amp(x[:, 0:1])
-        xp = self.stream_phase(x[:, 1:2])
-        fused = self.cross_attn(xa, xp)
-        fused = self.fuse(fused)
-        return self.classifier(fused)
+        # x: [B, 2, H, W]
+        xa = self.stream_amp(x[:, 0:1])  # [B, 32, h, w]
+        xp = self.stream_phase(x[:, 1:2])# [B, 32, h, w]
 
-if __name__ == '__main__':
-    # Training switch - Set to False to skip training and only evaluate
+        x = torch.cat([xa, xp], dim=1)   # [B, 64, h, w]
+        x = self.attention(x)            # channel attention
+        x = self.fuse(x)                 # [B, 64]
+
+        return self.classifier(x)        # logits
+
+
+# -------------------------
+# 5) Training / evaluation loop (main)
+# -------------------------
+if __name__ == "__main__":
+    # Configuration - adjust as needed
     TRAIN = True
-    SNR = "30"
-    
-    # Dataset setup - Load directly from Scalograms folder
-    data_dir = f'Scalograms/snr_{SNR}'
-    
-    # Split ratios
-    train_ratio = 0.8
-    val_ratio = 0.1
-    test_ratio = 0.1
-    
-    print("Creating train/val/test splits in memory...")
-    train_indices, val_indices, test_indices = create_train_val_test_split(
-        data_dir, train_ratio, val_ratio, test_ratio, seed=42
-    )
-    print(f"Split sizes - Train: {len(train_indices)}, Val: {len(val_indices)}, Test: {len(test_indices)}")
-    
-    # Calculate dataset stats using training data only
-    temp_train = ScalogramDataset(data_dir, indices=train_indices)
-    mean, std = calculate_dataset_stats(temp_train)
-    print(f"Dataset stats - Mean: {mean}, Std: {std}")
+    SNR = "0"
+    BATCH_SIZE = 128
+    EPOCHS = 50
+    DATA_DIR = f"Dataset/Scalograms/snr_{SNR}"
+    NUM_WORKERS = 4
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {DEVICE}")
 
-    # Data transforms
+    # 1) Create splits
+    print("Creating randomized train/val/test splits ...")
+    train_indices, val_indices, test_indices = create_randomized_split(DATA_DIR, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1)
+
+    # 2) Compute normalization stats using training subset
+    temp_dataset = ScalogramDataset(DATA_DIR, transform=None, indices=train_indices)
+    norm_mean, norm_std = compute_dataset_stats(temp_dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS)
+
+    # 3) Define transforms (augmentations BEFORE Normalize)
     train_transform = transforms.Compose([
-        transforms.Normalize(mean, std)
+        # mild spatial jitter
+        transforms.RandomApply([transforms.GaussianBlur(kernel_size=(3, 3))], p=0.2),
+        transforms.RandomAffine(degrees=0, translate=(0.04, 0.04)),
+        transforms.RandomErasing(p=0.25, scale=(0.01, 0.08)),
+        transforms.Normalize(norm_mean, norm_std)
     ])
 
     val_test_transform = transforms.Compose([
-        transforms.Normalize(mean, std)
+        transforms.Normalize(norm_mean, norm_std)
     ])
 
-    # Create datasets with their respective indices
-    train_dataset = ScalogramDataset(data_dir, train_transform, indices=train_indices)
-    val_dataset = ScalogramDataset(data_dir, val_test_transform, indices=val_indices)
-    test_dataset = ScalogramDataset(data_dir, val_test_transform, indices=test_indices)
+    # 4) Datasets and loaders
+    train_dataset = ScalogramDataset(DATA_DIR, transform=train_transform, indices=train_indices)
+    val_dataset = ScalogramDataset(DATA_DIR, transform=val_test_transform, indices=val_indices)
+    test_dataset = ScalogramDataset(DATA_DIR, transform=val_test_transform, indices=test_indices)
 
-    # Data loaders
-    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,
+                            num_workers=NUM_WORKERS, pin_memory=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,
+                             num_workers=NUM_WORKERS, pin_memory=True)
 
-    # Model setup
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(device)
-    model = DualStreamCWTNet(len(train_dataset.classes)).to(device)
-    print(sum(p.numel() for p in model.parameters()))
-    # Optimizer and scheduler
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
+    # 5) Model, optimizer, scheduler, loss
+    num_classes = len(train_dataset.classes)
+    model = DualStreamCNN(num_classes=num_classes).to(DEVICE)
+    
+    Number_of_parameters = sum(p.numel() for p in model.parameters())
+    print(f"Model initialized with {Number_of_parameters:,} parameters (DualStreamCNN).")
+    # Optimizer with smaller weight decay
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
+    # Use ReduceLROnPlateau for more conservative LR changes
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6)
     criterion = nn.CrossEntropyLoss()
 
+    # 6) Training loop with early stopping
     if TRAIN:
-        # Training loop with early stopping
         best_val_acc = 0.0
-        patience_counter = 0
-        patience = 7
-        num_epochs = 50
-        
-        # History tracking for plotting
-        history = {
-            'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': []
-        }
+        patience = 10
+        counter = 0
+        history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
 
-        for epoch in range(num_epochs):
+        print(f"Starting training for {EPOCHS} epochs ...")
+        for epoch in range(EPOCHS):
             model.train()
-            train_loss = 0.0
+            running_loss = 0.0
             correct = 0
             total = 0
 
-            for inputs, labels in train_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
+            loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
+            for inputs, labels in loop:
+                inputs = inputs.to(DEVICE)
+                labels = labels.to(DEVICE)
 
                 optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
                 loss.backward()
+
+                # gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                correct += (predicted == labels).sum().item()
+                running_loss += loss.item() * inputs.size(0)
+                _, preds = torch.max(outputs, dim=1)
+                correct += (preds == labels).sum().item()
                 total += labels.size(0)
+
+                loop.set_postfix(loss=loss.item(), acc=100.0 * correct / total)
+
+            train_loss = running_loss / total
+            train_acc = correct / total
 
             # Validation
             model.eval()
             val_loss = 0.0
-            val_correct = 0
-            val_total = 0
-
+            correct = 0
+            total = 0
             with torch.no_grad():
                 for inputs, labels in val_loader:
-                    inputs, labels = inputs.to(device), labels.to(device)
+                    inputs = inputs.to(DEVICE)
+                    labels = labels.to(DEVICE)
                     outputs = model(inputs)
                     loss = criterion(outputs, labels)
+                    val_loss += loss.item() * inputs.size(0)
+                    _, preds = torch.max(outputs, dim=1)
+                    correct += (preds == labels).sum().item()
+                    total += labels.size(0)
 
-                    val_loss += loss.item()
-                    _, predicted = outputs.max(1)
-                    val_correct += (predicted == labels).sum().item()
-                    val_total += labels.size(0)
+            val_loss = val_loss / total if total > 0 else 0.0
+            val_acc = correct / total if total > 0 else 0.0
 
-            # Calculate metrics
-            train_loss_avg = train_loss / len(train_loader)
-            val_loss_avg = val_loss / len(val_loader)
-            train_acc = correct / total
-            val_acc = val_correct / val_total
-            
-            # Store history
-            history['train_loss'].append(train_loss_avg)
-            history['train_acc'].append(train_acc)
-            history['val_loss'].append(val_loss_avg)
-            history['val_acc'].append(val_acc)
-            
-            current_lr = optimizer.param_groups[0]['lr']
+            # Scheduler step with metric
             scheduler.step(val_acc)
 
-            new_lr = optimizer.param_groups[0]['lr']
-            if new_lr != current_lr:
-                print(f"Learning rate reduced to {new_lr:.6f}")
+            history['train_loss'].append(train_loss)
+            history['train_acc'].append(train_acc)
+            history['val_loss'].append(val_loss)
+            history['val_acc'].append(val_acc)
 
-            print(f"Epoch {epoch + 1}/{num_epochs}")
-            print(f"Train Loss: {train_loss_avg:.4f} | Acc: {train_acc:.4f}")
-            print(f"Val Loss: {val_loss_avg:.4f} | Acc: {val_acc:.4f}\n")
+            print(f"Epoch {epoch+1} | Train Loss: {train_loss:.4f} Acc: {train_acc:.4f} | "
+                  f"Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
 
-            # Early stopping
+            # Checkpoint & early stopping
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                patience_counter = 0
-                torch.save(model.state_dict(), f"weights_snr{SNR}.pth")
+                counter = 0
+                torch.save(model.state_dict(), f"best_model_snr{SNR}.pth")
+                print(f"New best val acc {best_val_acc:.4f} -> saved model.")
             else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch + 1}")
+                counter += 1
+                if counter >= patience:
+                    print(f"Early stopping at epoch {epoch+1} (no improvement for {patience} epochs).")
                     break
-        
-        # Plot training history
-        print("Plotting training curves...")
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-        
-        epochs_range = range(1, len(history['train_loss']) + 1)
-        
-        # Loss plot
-        ax1.plot(epochs_range, history['train_loss'], 'b-', label='Training Loss', linewidth=2)
-        ax1.plot(epochs_range, history['val_loss'], 'r-', label='Validation Loss', linewidth=2)
-        ax1.set_xlabel('Epoch', fontsize=12)
-        ax1.set_ylabel('Loss', fontsize=12)
-        ax1.set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
-        ax1.legend(fontsize=10)
-        ax1.grid(True, alpha=0.3)
-        
-        # Accuracy plot
-        ax2.plot(epochs_range, history['train_acc'], 'b-', label='Training Accuracy', linewidth=2)
-        ax2.plot(epochs_range, history['val_acc'], 'r-', label='Validation Accuracy', linewidth=2)
-        ax2.set_xlabel('Epoch', fontsize=12)
-        ax2.set_ylabel('Accuracy', fontsize=12)
-        ax2.set_title('Training and Validation Accuracy', fontsize=14, fontweight='bold')
-        ax2.legend(fontsize=10)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig('training_curves.png', dpi=300, bbox_inches='tight')
-        print("Training curves saved to 'training_curves.png'")
-        plt.show()
-        
-    else:
-        print("Training skipped. Loading existing model...")
 
-    # Final evaluation
-    model.load_state_dict(torch.load(f"weights_snr{SNR}.pth"))
+        # Plot training curves
+        plt.figure(figsize=(12, 5))
+        plt.subplot(1, 2, 1)
+        plt.plot(history['train_loss'], label='Train')
+        plt.plot(history['val_loss'], label='Val')
+        plt.title('Loss')
+        plt.legend()
+        plt.subplot(1, 2, 2)
+        plt.plot(history['train_acc'], label='Train')
+        plt.plot(history['val_acc'], label='Val')
+        plt.title('Accuracy')
+        plt.legend()
+        plt.savefig(f'training_curves_snr{SNR}.png')
+        print("Saved training_curves_snr{SNR}.png")
+
+    # 7) Evaluation (load best model if available)
+    model_path = f"best_model_snr{SNR}.pth"
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+        print(f"Loaded best model from {model_path} for evaluation.")
+
     model.eval()
-
     all_preds = []
     all_labels = []
+    print("Running evaluation on test set ...")
     with torch.no_grad():
-        for inputs, labels in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
+        for inputs, labels in tqdm(test_loader, desc="Testing"):
+            inputs = inputs.to(DEVICE)
             outputs = model(inputs)
-            _, predicted = outputs.max(1)
+            _, preds = torch.max(outputs, dim=1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.numpy())
 
-            all_preds.extend(predicted.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+    # classification report
+    print("\nClassification Report:")
+    print(classification_report(all_labels, all_preds, target_names=train_dataset.classes, digits=4))
 
-    # Classification report
-    print("Classification Report:")
-    print(classification_report(all_labels, all_preds, target_names=train_dataset.classes))
-
-    # Confusion matrices
-    plt.figure(figsize=(15, 6))
-
-    # Raw counts
-    plt.subplot(1, 1, 1)
+    # confusion matrix
     cm = confusion_matrix(all_labels, all_preds)
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=train_dataset.classes,
-                yticklabels=train_dataset.classes)
-    plt.title("Confusion Matrix")
-
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=train_dataset.classes, yticklabels=train_dataset.classes)
+    plt.title(f'Confusion Matrix SNR {SNR}')
     plt.tight_layout()
-    plt.savefig(f"Confusion_Matrix_snr{SNR}.png")
-    plt.show()
-
+    plt.savefig(f'Confusion_Matrix_snr{SNR}.png')
+    print(f"Saved Confusion_Matrix_snr{SNR}.png")
+    print("Done.")

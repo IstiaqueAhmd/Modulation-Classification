@@ -208,10 +208,10 @@ class DualStreamCNN(nn.Module):
 if __name__ == "__main__":
     # Configuration - adjust as needed
     TRAIN = True
-    SNR = "30"
+    SNR = "0"
     BATCH_SIZE = 128
     EPOCHS = 50
-    DATA_DIR = f"Scalograms/snr_{SNR}"
+    DATA_DIR = f"Dataset/Scalograms/snr_{SNR}"
     NUM_WORKERS = 4
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {DEVICE}")
@@ -252,7 +252,9 @@ if __name__ == "__main__":
     # 5) Model, optimizer, scheduler, loss
     num_classes = len(train_dataset.classes)
     model = DualStreamCNN(num_classes=num_classes).to(DEVICE)
-
+    
+    Number_of_parameters = sum(p.numel() for p in model.parameters())
+    print(f"Model initialized with {Number_of_parameters:,} parameters (DualStreamCNN).")
     # Optimizer with smaller weight decay
     optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-5)
     # Use ReduceLROnPlateau for more conservative LR changes
@@ -351,8 +353,8 @@ if __name__ == "__main__":
         plt.plot(history['val_acc'], label='Val')
         plt.title('Accuracy')
         plt.legend()
-        plt.savefig('training_curves.png')
-        print("Saved training_curves.png")
+        plt.savefig(f'training_curves_snr{SNR}.png')
+        print("Saved training_curves_snr{SNR}.png")
 
     # 7) Evaluation (load best model if available)
     model_path = f"best_model_snr{SNR}.pth"
