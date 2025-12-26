@@ -313,7 +313,7 @@ if __name__ == "__main__":
     NUM_WORKERS = 2
     
     # Model and stats file paths
-    MODEL_PATH = "best_model_multisnr_mod1.pth"
+    MODEL_PATH = "best_model.pth"
     STATS_PATH = "normalization_stats_multisnr.json"
     
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -549,9 +549,9 @@ if __name__ == "__main__":
     plt.xlabel('Predicted')
     plt.ylabel('True')
     plt.tight_layout()
-    plt.savefig(f'mod1_confusion_matrix_test_snr{TEST_SNR}.png')
+    plt.savefig(f'confusion_matrix_test_snr{TEST_SNR}.png')
     plt.close()
-    print(f"Saved mod1_confusion_matrix_test_snr{TEST_SNR}.png")
+    print(f"Saved confusion_matrix_test_snr{TEST_SNR}.png")
     
     print("\nDone.")
 
