@@ -107,11 +107,15 @@ def generate_ampphase_scalograms(snr_list):
                     print(f"   [!] Error loading {fname}: {e}")
                     continue
 
-                # 2. Extract Amplitude and Phase (already computed in data_extractor)
-                # Column 0: Amplitude = sqrt(I^2 + Q^2)
-                # Column 1: Phase = arctan2(Q, I) in radians
-                amp_sig = data[:, 0]
-                phase_sig = np.unwrap(data[:, 1])  # Unwrap to avoid discontinuities
+                # 2. Compute Amplitude and Phase from raw I/Q data
+                # Column 0: I (In-phase), Column 1: Q (Quadrature)
+                i_sig = data[:, 0]
+                q_sig = data[:, 1]
+                
+                # Compute amplitude: sqrt(I^2 + Q^2)
+                amp_sig = np.sqrt(i_sig**2 + q_sig**2)
+                # Compute phase: arctan2(Q, I) and unwrap to avoid discontinuities
+                phase_sig = np.unwrap(np.arctan2(q_sig, i_sig))
 
                 # 4. Compute CWTs
                 cwt_amp = compute_cwt(amp_sig)
